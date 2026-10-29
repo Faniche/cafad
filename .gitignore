@@ -110,17 +110,8 @@ Desktop.ini
 *.ilg
 *-converted-to.pdf
 
-# Compiled papers/presentations are generated. Keep PDF figure assets explicitly.
-*.pdf
-!/docs/figures/**/*.pdf
-!/paper/figures/**/*.pdf
-!/paper/**/Fig*.pdf
-!/docs/*_fig.pdf
-
 # Historical manuscript exports and downloaded reference-paper collections
-/docs/papers/
-/docs/refefences/
-/docs/references/
+/docs/**
 
 # Distribution archives and temporary/lock files
 *.zip
