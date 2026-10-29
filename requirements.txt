@@ -1,0 +1,16 @@
+# Deep Learning Dependencies
+torch
+
+# Data Processing
+numpy
+pandas
+scipy
+
+# Visualization
+matplotlib
+seaborn
+plotly
+
+pyyaml
+
+openpyxl

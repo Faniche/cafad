@@ -1,0 +1,146 @@
+# Track source code, tests, manuscript sources, bibliography, templates,
+# documentation, configuration, and manuscript figure assets by default.
+
+# Python environments, bytecode, packaging, and test/tool caches
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.ipynb_checkpoints/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.egg-info/
+*.egg
+/build/
+/dist/
+
+# Local credentials and machine-specific editor settings
+.env
+.env.*
+!.env.example
+!.env.template
+/.vscode/
+/.idea/
+/*.code-workspace
+/settings-linux*.json
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Dataset contents: keep directory traversal enabled so embedded source code
+# and experiment descriptions/configuration can still be version-controlled.
+/data/**
+
+
+# Binary datasets, serialized estimators, and model weights anywhere else
+*.npy
+*.npz
+*.parquet
+*.arrow
+*.feather
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.joblib
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.tfrecord
+*.tfrecords
+
+# Runtime output; keep experiment configuration and small result tables outside
+# these output folders eligible for tracking.
+/runs/
+/checkpoints/
+/logs/
+/wandb/
+/mlruns/
+/lightning_logs/
+/tensorboard/
+*.tfevents.*
+
+# Scratch directory: preserve Python/TeX sources and utility scripts already here.
+/tmp/**
+
+
+# LaTeX generated files; retain .tex/.bib/.cls/.sty/.bst and .latexmkrc.
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.run.xml
+*.synctex
+*.synctex.gz
+*.xdv
+*.dvi
+*.toc
+*.lof
+*.lot
+*.nav
+*.snm
+*.vrb
+*.xdot
+*.acn
+*.acr
+*.alg
+*.glg
+*.glo
+*.gls
+*.ist
+*.idx
+*.ind
+*.ilg
+*-converted-to.pdf
+
+# Compiled papers/presentations are generated. Keep PDF figure assets explicitly.
+*.pdf
+!/docs/figures/**/*.pdf
+!/paper/figures/**/*.pdf
+!/paper/**/Fig*.pdf
+!/docs/*_fig.pdf
+
+# Historical manuscript exports and downloaded reference-paper collections
+/docs/papers/
+/docs/refefences/
+/docs/references/
+
+# Distribution archives and temporary/lock files
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+*.bz2
+*.xz
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+~$*
+
+# Reapply cache/environment exclusions after the source-directory exceptions.
+**/__pycache__/
+**/.venv/
+**/venv/
+**/.ipynb_checkpoints/
