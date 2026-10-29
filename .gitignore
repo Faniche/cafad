@@ -111,7 +111,7 @@ Desktop.ini
 *-converted-to.pdf
 
 # Historical manuscript exports and downloaded reference-paper collections
-/docs/**
+docs/**
 
 # Distribution archives and temporary/lock files
 *.zip
@@ -135,3 +135,7 @@ Desktop.ini
 **/.venv/
 **/venv/
 **/.ipynb_checkpoints/
+
+.github/**
+
+.latexmkrc
