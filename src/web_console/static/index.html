@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CAFAD 实验控制台</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <section id="login-screen" class="auth-screen" aria-labelledby="login-title">
+    <form id="login-form" class="login-card">
+      <p class="eyebrow">CAFAD · Server Console</p>
+      <h1 id="login-title">实验控制台登录</h1>
+      <p>输入服务器 <code>.env</code> 中的 <code>web_console_token</code>。验证只在服务端比对令牌的 SHA-256 摘要；成功后浏览器仅保留短期、不可由 JavaScript 读取的会话 Cookie。</p>
+      <label class="field"><span>访问令牌 <b>*</b></span><input id="login-token" type="password" autocomplete="current-password" required></label>
+      <button type="submit">进入控制台</button>
+      <p id="login-status" class="form-status" role="status"></p>
+    </form>
+  </section>
+
+  <div id="console-shell" class="app-shell" hidden>
+    <aside class="sidebar" aria-label="控制台导航">
+      <div class="brand"><p class="eyebrow">CAFAD</p><h1>实验控制台</h1></div>
+      <nav id="navigation" class="navigation">
+        <p class="nav-label">配置</p>
+        <button id="global-nav" class="nav-item selected" type="button">总体设置</button>
+        <p class="nav-label">项目模块</p>
+        <div id="module-nav"></div>
+      </nav>
+      <p class="sidebar-note">每次只能启动一个模块；模块参数来自实际 <code>api.py</code>。</p>
+    </aside>
+
+    <main class="workspace">
+      <header class="workspace-header">
+        <div><p id="view-kicker" class="eyebrow">全局运行配置</p><h2 id="view-title">总体设置</h2></div>
+        <div class="session-actions"><span>已登录</span><button id="logout-button" class="secondary" type="button">退出登录</button></div>
+      </header>
+
+      <form id="settings-form">
+        <section id="global-view" class="panel view-panel">
+          <h3>运行参数</h3>
+          <p>这些参数由根入口 <code>main.py</code> 统一解析，并会应用到当前选择的模块。数据集 ID 从输入文件或上游清单自动读取，运行 ID、产物目录和工作进程数由系统统一分配。</p>
+          <div class="form-grid" id="global-fields"></div>
+          <p class="inline-note">请在左侧选择一个模块，再配置其输入与算法参数并启动。</p>
+        </section>
+
+        <section id="module-view" class="panel view-panel" hidden>
+          <h3 id="module-heading"></h3>
+          <p id="module-description">参数由模块 <code>api.py</code> 的实际 argparse 定义生成。</p>
+          <div class="module-fields" id="module-fields"></div>
+          <div class="actions"><button id="run-button" type="submit">启动模块</button><span id="form-status" class="form-status" role="status"></span></div>
+        </section>
+      </form>
+
+      <section class="panel output-panel" aria-labelledby="output-title">
+        <div class="output-heading"><h3 id="output-title">任务输出</h3><span id="job-status">尚未启动</span></div>
+        <p id="command" class="command">等待选择模块并提交。</p>
+        <pre id="logs" aria-live="polite"></pre>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="file-dialog" aria-labelledby="file-dialog-title">
+    <div class="dialog-heading"><div><p class="eyebrow">SERVER RESOURCE BROWSER</p><h2 id="file-dialog-title">选择输入文件</h2></div><button id="file-dialog-close" class="icon-button" type="button" aria-label="关闭文件选择器">×</button></div>
+    <p class="dialog-note">仅列出当前用户目录和项目目录中的非隐藏项；可浏览目录，但不会读取或下载文件内容。</p>
+    <div class="browser-controls"><div id="browser-roots" class="root-tabs"><button type="button" data-root="home">用户目录</button><button type="button" data-root="project">项目目录</button></div><button id="browser-up" class="secondary" type="button">上一级</button></div>
+    <p id="browser-path" class="browser-path"></p>
+    <p id="browser-status" class="form-status" role="status"></p>
+    <div id="browser-entries" class="browser-entries" aria-live="polite"></div>
+    <div class="dialog-actions"><button id="browser-select-directory" class="secondary" type="button" hidden>选择当前目录</button><button id="browser-cancel" class="secondary" type="button">取消</button></div>
+  </dialog>
+  <script src="/static/app.js"></script>
+</body>
+</html>

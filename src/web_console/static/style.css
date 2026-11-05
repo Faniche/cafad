@@ -1,0 +1,73 @@
+:root { color-scheme: dark; font-family: "Times New Roman", Georgia, serif; background: #111827; color: #edf2f7; }
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; min-width: 320px; }
+button, input, select { font: inherit; }
+button { border: 0; border-radius: 6px; padding: 10px 16px; background: #0284c7; color: white; cursor: pointer; }
+button:hover:not(:disabled) { background: #0369a1; }
+button:disabled { cursor: not-allowed; opacity: .55; }
+button.secondary { background: #25334a; color: #dbeafe; border: 1px solid #475569; }
+button.secondary:hover:not(:disabled) { background: #334155; }
+h1, h2, h3, p { margin-top: 0; }
+h1 { margin-bottom: 8px; font-size: clamp(1.8rem, 3vw, 2.5rem); }
+h2 { margin-bottom: 0; font-size: 1.55rem; }
+h3 { font-size: 1.2rem; }
+p { color: #cbd5e1; line-height: 1.6; }
+code { color: #a5f3fc; }
+.eyebrow { margin-bottom: 5px; color: #7dd3fc; letter-spacing: .12em; font-size: .75rem; text-transform: uppercase; }
+.auth-screen { display: grid; min-height: 100vh; padding: 24px; place-items: center; background: radial-gradient(circle at 30% 20%, #164e6355, transparent 38%), #111827; }
+.login-card { width: min(540px, 100%); padding: 34px; border: 1px solid #334155; border-radius: 12px; background: #172033; box-shadow: 0 18px 48px #02061788; }
+.login-card > button { width: 100%; margin-top: 20px; }
+.app-shell { display: grid; min-height: 100vh; grid-template-columns: 254px minmax(0, 1fr); }
+.sidebar { display: flex; position: sticky; top: 0; height: 100vh; flex-direction: column; padding: 25px 16px; border-right: 1px solid #334155; background: #0f172a; }
+.brand { padding: 0 10px 20px; border-bottom: 1px solid #334155; }
+.brand h1 { margin: 0; font-size: 1.35rem; }
+.navigation { flex: 1; padding-top: 17px; }
+.nav-label { margin: 13px 10px 7px; color: #64748b; font-size: .73rem; letter-spacing: .1em; text-transform: uppercase; }
+.nav-item { display: block; width: 100%; margin: 2px 0; border: 1px solid transparent; background: transparent; color: #cbd5e1; text-align: left; }
+.nav-item:hover:not(:disabled), .nav-item.selected { border-color: #1e4d73; background: #12314a; color: #e0f2fe; }
+.sidebar-note { margin: 20px 9px 0; color: #94a3b8; font-size: .83rem; }
+.workspace { width: min(1280px, 100%); margin: 0 auto; padding: 35px 38px 64px; }
+.workspace-header { display: flex; justify-content: space-between; gap: 24px; align-items: center; margin-bottom: 25px; }
+.session-actions { display: flex; align-items: center; gap: 13px; color: #94a3b8; font-size: .85rem; }
+.panel { margin-bottom: 22px; padding: 25px; border: 1px solid #334155; border-radius: 10px; background: #172033; box-shadow: 0 16px 40px #02061744; }
+.view-panel > p { max-width: 780px; }
+.form-grid, .module-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(225px, 1fr)); gap: 16px; margin: 22px 0; }
+.module-fields { padding-top: 2px; }
+.field { display: grid; gap: 7px; color: #cbd5e1; font-size: .92rem; }
+.field.full { grid-column: 1 / -1; }
+.field b { color: #fb7185; }
+input, select { width: 100%; border: 1px solid #475569; border-radius: 6px; padding: 10px 11px; background: #0f172a; color: #f8fafc; }
+input:focus, select:focus { outline: 2px solid #38bdf8; outline-offset: 1px; }
+.input-with-button { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.browse-button { padding: 8px 12px; white-space: nowrap; }
+.checkbox { display: flex; gap: 9px; align-items: center; min-height: 42px; }
+.checkbox input { width: auto; accent-color: #38bdf8; }
+.hint, .inline-note, .dialog-note { margin: -2px 0 0; color: #94a3b8; font-size: .82rem; }
+.actions { display: flex; gap: 16px; align-items: center; margin-top: 12px; }
+.form-status { min-height: 1.2em; color: #fda4af; }
+.output-heading { display: flex; justify-content: space-between; gap: 20px; align-items: center; }
+.output-heading h3 { margin: 0; }
+#job-status { color: #7dd3fc; font-family: ui-monospace, Consolas, monospace; font-size: .85rem; }
+.command { overflow-wrap: anywhere; font-family: ui-monospace, Consolas, monospace; font-size: .83rem; color: #a5f3fc; }
+#logs { min-height: 230px; max-height: 520px; margin: 14px 0 0; overflow: auto; padding: 16px; border-radius: 6px; background: #020617; color: #d1fae5; font: .82rem/1.48 ui-monospace, Consolas, monospace; white-space: pre-wrap; }
+dialog { width: min(760px, calc(100% - 28px)); padding: 0; border: 1px solid #475569; border-radius: 10px; background: #172033; color: #edf2f7; box-shadow: 0 20px 65px #020617cc; }
+dialog::backdrop { background: #020617aa; }
+.dialog-heading { display: flex; justify-content: space-between; gap: 20px; align-items: start; padding: 24px 24px 0; }
+.dialog-heading h2 { font-size: 1.35rem; }
+.icon-button { padding: 1px 10px 5px; background: transparent; color: #cbd5e1; font-size: 1.7rem; line-height: 1; }
+.dialog-note { margin: 15px 24px; }
+.browser-controls { display: flex; justify-content: space-between; gap: 15px; align-items: center; padding: 0 24px; }
+.root-tabs { display: flex; gap: 7px; flex-wrap: wrap; }
+.root-tabs button { padding: 7px 10px; background: #25334a; border: 1px solid #475569; }
+.root-tabs button.selected { background: #0c4a6e; border-color: #38bdf8; }
+.browser-path { margin: 15px 24px 8px; overflow-wrap: anywhere; color: #a5f3fc; font-family: ui-monospace, Consolas, monospace; font-size: .82rem; }
+#browser-status { margin: 0 24px 8px; }
+.browser-entries { max-height: 360px; margin: 0 24px; overflow: auto; border: 1px solid #334155; border-radius: 7px; background: #0f172a; }
+.browser-entry { display: flex; min-height: 44px; justify-content: space-between; gap: 16px; align-items: center; padding: 7px 11px; border-bottom: 1px solid #243044; }
+.browser-entry:last-child { border-bottom: 0; }
+.browser-name { min-width: 0; overflow-wrap: anywhere; color: #e2e8f0; }
+.browser-entry button { padding: 6px 10px; }
+.dialog-actions { display: flex; justify-content: end; gap: 10px; padding: 18px 24px 24px; }
+@media (max-width: 760px) { .app-shell { display: block; } .sidebar { position: static; height: auto; min-height: 0; } .navigation { padding-top: 8px; } .sidebar-note { display: none; } .workspace { padding: 24px 16px 48px; } .workspace-header { align-items: start; flex-direction: column; } .panel { padding: 18px; } }
+@media (max-width: 460px) { .login-card { padding: 25px 20px; } .browser-controls { align-items: stretch; flex-direction: column; } .browser-controls > button { align-self: flex-end; } }
