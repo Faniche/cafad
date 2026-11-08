@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import logging
 from pathlib import Path
+import time
 
 import numpy as np
 import pandas as pd
@@ -53,8 +55,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help='自动搜索的 HDBSCAN 最小稳定簇片段数（默认：4 8 12）')
     parser.add_argument('--min-samples-values', nargs='+', type=int, default=(2, 4),
                         help='自动搜索的 HDBSCAN 局部密度保守度（默认：2 4）')
-    parser.add_argument('--max-group-fraction', type=float, default=0.75,
-                        help='候选优先条件：单个有效组最多覆盖本阶段正常片段的比例（默认 0.75）')
+    parser.add_argument('--min-group-members', type=int, default=12,
+                        help='有效组至少保留的正常训练片段数（默认 12，保证专家具备基本训练样本）')
+    parser.add_argument('--max-group-fraction', type=float, default=1.0,
+                        help='候选优先条件：单个有效组最多覆盖本阶段正常片段的比例（默认 1.0，即不强制拆分稳定大组）')
     parser.add_argument('--min-reference-flights', type=int, default=2, help='有效组同源去重后的最小参考航班数')
     parser.add_argument('--distance-block-size', type=int, default=256, help='构造完整距离矩阵的行块大小')
     return parser
@@ -118,7 +122,7 @@ def _candidate_pairs(args: argparse.Namespace) -> tuple[tuple[int, int], ...]:
 
 
 def _fit_candidate(phase: str, phase_rows: pd.DataFrame, matrix: np.ndarray, min_cluster_size: int,
-                   min_samples: int, min_reference_flights: int) -> HdbscanCandidate:
+                   min_samples: int, min_group_members: int, min_reference_flights: int) -> HdbscanCandidate:
     """拟合一次 HDBSCAN，并以同源去重后的参考数筛选真正可用的簇。"""
     fitted = HDBSCAN(min_cluster_size=min_cluster_size, min_samples=min_samples, metric='precomputed',
                      algorithm='brute', n_jobs=1, cluster_selection_method='eom', allow_single_cluster=True,
@@ -132,7 +136,7 @@ def _fit_candidate(phase: str, phase_rows: pd.DataFrame, matrix: np.ndarray, min
         members = phase_rows.iloc[positions]
         references = (members.sort_values(['flight_id', 'ordinal', 'segment_id'], kind='stable')
                       .drop_duplicates('flight_id', keep='first'))
-        if references['flight_id'].nunique() >= min_reference_flights:
+        if len(members) >= min_group_members and references['flight_id'].nunique() >= min_reference_flights:
             effective.append((label, positions, references['segment_id'].astype(str).to_numpy()))
     covered = int(sum(len(item[1]) for item in effective))
     group_sizes = [len(item[1]) for item in effective]
@@ -164,7 +168,7 @@ def _selection_row(candidate: HdbscanCandidate, normal_count: int, selected: boo
 
 
 def _fit_groups(normal: pd.DataFrame, anchors: dict[str, np.ndarray], args: argparse.Namespace,
-                config: DistanceConfig) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, str], pd.DataFrame, pd.DataFrame]:
+                config: DistanceConfig, logger: logging.Logger) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, str], pd.DataFrame, pd.DataFrame]:
     """按阶段自动选择覆盖率优先的 HDBSCAN 配置，并保留合格正常参考组。"""
     group_rows: list[dict[str, object]] = []
     routing_rows: list[dict[str, object]] = []
@@ -177,15 +181,24 @@ def _fit_groups(normal: pd.DataFrame, anchors: dict[str, np.ndarray], args: argp
         ids = phase_rows['segment_id'].astype(str).tolist()
         candidates: list[HdbscanCandidate] = []
         if len(ids) >= min(args.min_cluster_sizes):
+            logger.debug('开始构造阶段距离矩阵：phase=%s；normal_segments=%d', phase, len(ids))
             matrix = _distance_matrix(ids, anchors, config, args.distance_block_size)
             for min_cluster_size, min_samples in _candidate_pairs(args):
                 if min_cluster_size <= len(ids):
+                    started = time.monotonic()
+                    logger.debug('开始 HDBSCAN 候选：phase=%s；min_cluster_size=%d；min_samples=%d',
+                                 phase, min_cluster_size, min_samples)
                     candidates.append(_fit_candidate(str(phase), phase_rows, matrix, min_cluster_size, min_samples,
-                                                     args.min_reference_flights))
+                                                     args.min_group_members, args.min_reference_flights))
+                    logger.debug('完成 HDBSCAN 候选：phase=%s；min_cluster_size=%d；min_samples=%d；耗时=%.2fs；coverage=%.4f',
+                                 phase, min_cluster_size, min_samples, time.monotonic() - started, candidates[-1].coverage)
         if not candidates:
             exclusions.extend(_exclusion_rows(phase_rows, 'hdbscan_insufficient_phase'))
             continue
         selected = _select_candidate(candidates, args.max_group_fraction)
+        logger.debug('阶段 HDBSCAN 选择：phase=%s；min_cluster_size=%d；min_samples=%d；coverage=%.4f；groups=%d；largest_fraction=%.4f',
+                     phase, selected.min_cluster_size, selected.min_samples, selected.coverage,
+                     len(selected.effective_clusters), selected.largest_group_fraction)
         selection_rows.extend(_selection_row(candidate, len(phase_rows), candidate is selected) for candidate in candidates)
         provisional.extend((selected, label, positions, reference_ids)
                            for label, positions, reference_ids in selected.effective_clusters)
@@ -282,9 +295,10 @@ def _assignment_row(row: object, group_id: str, distance: float, mode: str) -> d
 def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
     """以训练正常片段固定 HDBSCAN 组结构，并为所有训练目标生成唯一专家归属。"""
     if (args.anchors < 1 or not args.min_cluster_sizes or min(args.min_cluster_sizes) < 2 or
-            not args.min_samples_values or min(args.min_samples_values) < 1 or not 0 < args.max_group_fraction <= 1 or
+            not args.min_samples_values or min(args.min_samples_values) < 1 or args.min_group_members < 2 or
+            not 0 < args.max_group_fraction <= 1 or
             args.min_reference_flights < 2 or args.distance_block_size < 1):
-        raise ValueError('anchors、HDBSCAN 候选、max-group-fraction、min-reference-flights 和 distance-block-size 必须有效；最小参考航班数至少为 2')
+        raise ValueError('anchors、HDBSCAN 候选、min-group-members、max-group-fraction、min-reference-flights 和 distance-block-size 必须有效；最小成员及参考航班数至少为 2')
     input_manifest = _project_path(context, args.input).resolve()
     distance_path = _project_path(context, args.distance_config).resolve()
     config = load_distance_config(distance_path)
@@ -298,9 +312,9 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
                          normal.groupby('phase', observed=True).size().to_dict())
     anchors = _anchors_for_segments(recognized, values.loc[values['segment_id'].isin(recognized['segment_id'])], args.anchors)
     candidates = _candidate_pairs(args)
-    context.logger.info('开始对训练集正常片段进行 HDBSCAN 建组：normal=%d；recognized=%d；anchors≤%d；candidates=%s；max_group_fraction=%g',
-                        len(normal), len(recognized), args.anchors, candidates, args.max_group_fraction)
-    groups, core, references, normal_assignments, exclusions, selection = _fit_groups(normal, anchors, args, config)
+    context.logger.info('开始对训练集正常片段进行 HDBSCAN 建组：normal=%d；recognized=%d；anchors≤%d；candidates=%s；min_group_members=%d；max_group_fraction=%g',
+                        len(normal), len(recognized), args.anchors, candidates, args.min_group_members, args.max_group_fraction)
+    groups, core, references, normal_assignments, exclusions, selection = _fit_groups(normal, anchors, args, config, context.logger)
     context.logger.debug('HDBSCAN 建组原始结果：groups=%d；routing_members=%d；references=%d；excluded=%d；selection=%s',
                          len(groups), len(core), len(references), len(exclusions), selection.loc[selection['selected']].to_dict('records'))
     if groups.empty or core.empty or references.empty:
