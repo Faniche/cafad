@@ -1,13 +1,13 @@
-"""api.py | 2026-11-08 | 训练正常片段 DBSCAN 分组及训练路由 | Codex."""
+"""api.py | 2026-11-09 | 训练正常片段 HDBSCAN 分组及训练路由 | Codex."""
 from __future__ import annotations
 
 import argparse
-import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.cluster import DBSCAN
+from sklearn.cluster import HDBSCAN
 
 from src.app.arguments import ProjectArgumentParser
 from src.app.artifacts import read_manifest
@@ -16,23 +16,45 @@ from src.app.contracts import ModuleResult, RunContext, ValidationReport
 from .distance import DistanceConfig, load_distance_config, sample_anchors, segment_distance
 
 
-GROUP_COLUMNS = ('group_id', 'expert_id', 'phase', 'cluster_label', 'members', 'core_members', 'reference_flights')
-CORE_COLUMNS = ('group_id', 'segment_id', 'flight_id', 'phase')
+GROUP_COLUMNS = ('group_id', 'expert_id', 'phase', 'cluster_label', 'members', 'routing_members',
+                 'reference_flights', 'min_cluster_size', 'min_samples', 'mean_membership_probability')
+ROUTING_COLUMNS = ('group_id', 'segment_id', 'flight_id', 'phase', 'membership_probability')
 REFERENCE_COLUMNS = ('group_id', 'segment_id', 'flight_id', 'phase', 'ordinal')
 ASSIGNMENT_COLUMNS = ('segment_id', 'flight_id', 'phase', 'segment_label', 'group_id', 'expert_id', 'distance', 'route_mode')
 EXCLUSION_COLUMNS = ('segment_id', 'flight_id', 'phase', 'segment_label', 'reason')
+SELECTION_COLUMNS = ('phase', 'min_cluster_size', 'min_samples', 'clusters_before_reference_filter',
+                     'effective_groups', 'covered_segments', 'normal_segments', 'coverage', 'largest_group_fraction',
+                     'mean_membership_probability', 'selected')
+
+
+@dataclass(frozen=True)
+class HdbscanCandidate:
+    """保存一个阶段中一次 HDBSCAN 拟合及参考约束后的可比较结果。"""
+
+    phase: str
+    min_cluster_size: int
+    min_samples: int
+    labels: np.ndarray
+    probabilities: np.ndarray
+    effective_clusters: tuple[tuple[int, np.ndarray, np.ndarray], ...]
+    clusters_before_reference_filter: int
+    coverage: float
+    largest_group_fraction: float
+    mean_membership_probability: float
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """定义训练片段建组参数。"""
-    parser = ProjectArgumentParser(prog='main.py -m group', description='仅以训练正常阶段片段拟合 DBSCAN 正常参考组。')
+    """定义训练正常片段 HDBSCAN 建组与自动候选选择参数。"""
+    parser = ProjectArgumentParser(prog='main.py -m group', description='仅以训练正常阶段片段拟合 HDBSCAN 正常参考组。')
     parser.add_argument('--input', required=True, type=Path, help='segment 模块已发布的 manifest.json')
     parser.add_argument('--distance-config', required=True, type=Path, help='schema_version=1 的片段距离 JSON/YAML')
     parser.add_argument('--anchors', type=int, default=8, help='每片段实际锚点的最大数量')
-    parser.add_argument('--eps', type=float, default=1.0,
-                        help='预计算片段距离 DBSCAN 邻域半径（启动默认 1.0，须用验证集调参）')
-    parser.add_argument('--min-samples', type=int, default=5,
-                        help='DBSCAN 每簇最小片段邻域数量（含自身；启动默认 5，须用验证集调参）')
+    parser.add_argument('--min-cluster-sizes', nargs='+', type=int, default=(4, 8, 12),
+                        help='自动搜索的 HDBSCAN 最小稳定簇片段数（默认：4 8 12）')
+    parser.add_argument('--min-samples-values', nargs='+', type=int, default=(2, 4),
+                        help='自动搜索的 HDBSCAN 局部密度保守度（默认：2 4）')
+    parser.add_argument('--max-group-fraction', type=float, default=0.75,
+                        help='候选优先条件：单个有效组最多覆盖本阶段正常片段的比例（默认 0.75）')
     parser.add_argument('--min-reference-flights', type=int, default=2, help='有效组同源去重后的最小参考航班数')
     parser.add_argument('--distance-block-size', type=int, default=256, help='构造完整距离矩阵的行块大小')
     return parser
@@ -89,56 +111,114 @@ def _distance_matrix(segment_ids: list[str], anchors: dict[str, np.ndarray], con
     return matrix
 
 
+def _candidate_pairs(args: argparse.Namespace) -> tuple[tuple[int, int], ...]:
+    """返回去重且稳定排序的有限 HDBSCAN 候选网格。"""
+    return tuple((size, samples) for size in sorted(set(args.min_cluster_sizes))
+           for samples in sorted(set(args.min_samples_values)))
+
+
+def _fit_candidate(phase: str, phase_rows: pd.DataFrame, matrix: np.ndarray, min_cluster_size: int,
+                   min_samples: int, min_reference_flights: int) -> HdbscanCandidate:
+    """拟合一次 HDBSCAN，并以同源去重后的参考数筛选真正可用的簇。"""
+    fitted = HDBSCAN(min_cluster_size=min_cluster_size, min_samples=min_samples, metric='precomputed',
+                     algorithm='brute', n_jobs=1, cluster_selection_method='eom', allow_single_cluster=True,
+                     copy=False).fit(matrix.copy())
+    labels = np.asarray(fitted.labels_, dtype=np.int64)
+    probabilities = np.asarray(fitted.probabilities_, dtype=np.float64)
+    effective: list[tuple[int, np.ndarray, np.ndarray]] = []
+    cluster_labels = sorted(int(label) for label in set(labels) if label >= 0)
+    for label in cluster_labels:
+        positions = np.flatnonzero(labels == label)
+        members = phase_rows.iloc[positions]
+        references = (members.sort_values(['flight_id', 'ordinal', 'segment_id'], kind='stable')
+                      .drop_duplicates('flight_id', keep='first'))
+        if references['flight_id'].nunique() >= min_reference_flights:
+            effective.append((label, positions, references['segment_id'].astype(str).to_numpy()))
+    covered = int(sum(len(item[1]) for item in effective))
+    group_sizes = [len(item[1]) for item in effective]
+    member_positions = np.concatenate([item[1] for item in effective]) if effective else np.array([], dtype=np.int64)
+    member_probabilities = probabilities[member_positions]
+    return HdbscanCandidate(phase=phase, min_cluster_size=min_cluster_size, min_samples=min_samples,
+                            labels=labels, probabilities=probabilities, effective_clusters=tuple(effective),
+                            clusters_before_reference_filter=len(cluster_labels), coverage=covered / len(phase_rows),
+                            largest_group_fraction=(max(group_sizes) / len(phase_rows) if group_sizes else 0.0),
+                            mean_membership_probability=(float(member_probabilities.mean()) if len(member_probabilities) else 0.0))
+
+
+def _select_candidate(candidates: list[HdbscanCandidate], max_group_fraction: float) -> HdbscanCandidate:
+    """覆盖率优先选择可用候选；优先回避单一超大组，所有候选都超限时仍保留最佳可审计结果。"""
+    if not candidates:
+        raise ValueError('当前阶段没有可运行的 HDBSCAN 候选配置')
+    return max(candidates, key=lambda item: (item.largest_group_fraction <= max_group_fraction,
+                                              item.coverage, item.mean_membership_probability,
+                                              item.min_cluster_size, item.min_samples, -item.largest_group_fraction))
+
+
+def _selection_row(candidate: HdbscanCandidate, normal_count: int, selected: bool) -> dict[str, object]:
+    return {'phase': candidate.phase, 'min_cluster_size': candidate.min_cluster_size, 'min_samples': candidate.min_samples,
+            'clusters_before_reference_filter': candidate.clusters_before_reference_filter,
+            'effective_groups': len(candidate.effective_clusters), 'covered_segments': round(candidate.coverage * normal_count),
+            'normal_segments': normal_count, 'coverage': candidate.coverage,
+            'largest_group_fraction': candidate.largest_group_fraction,
+            'mean_membership_probability': candidate.mean_membership_probability, 'selected': selected}
+
+
 def _fit_groups(normal: pd.DataFrame, anchors: dict[str, np.ndarray], args: argparse.Namespace,
-                config: DistanceConfig) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, str], pd.DataFrame]:
-    """按阶段 DBSCAN，保留正常参考去重后仍具备多个航班的组。"""
+                config: DistanceConfig) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, str], pd.DataFrame, pd.DataFrame]:
+    """按阶段自动选择覆盖率优先的 HDBSCAN 配置，并保留合格正常参考组。"""
     group_rows: list[dict[str, object]] = []
-    core_rows: list[dict[str, object]] = []
+    routing_rows: list[dict[str, object]] = []
     reference_rows: list[dict[str, object]] = []
     assignments: dict[str, str] = {}
     exclusions: list[dict[str, object]] = []
-    provisional: list[tuple[str, str, pd.DataFrame, np.ndarray, np.ndarray]] = []
+    selection_rows: list[dict[str, object]] = []
+    provisional: list[tuple[HdbscanCandidate, int, np.ndarray, np.ndarray]] = []
     for phase, phase_rows in normal.groupby('phase', sort=True, observed=True):
         ids = phase_rows['segment_id'].astype(str).tolist()
-        if len(ids) < args.min_samples:
-            exclusions.extend(_exclusion_rows(phase_rows, 'dbscan_noise_or_insufficient_phase'))
+        candidates: list[HdbscanCandidate] = []
+        if len(ids) >= min(args.min_cluster_sizes):
+            matrix = _distance_matrix(ids, anchors, config, args.distance_block_size)
+            for min_cluster_size, min_samples in _candidate_pairs(args):
+                if min_cluster_size <= len(ids):
+                    candidates.append(_fit_candidate(str(phase), phase_rows, matrix, min_cluster_size, min_samples,
+                                                     args.min_reference_flights))
+        if not candidates:
+            exclusions.extend(_exclusion_rows(phase_rows, 'hdbscan_insufficient_phase'))
             continue
-        matrix = _distance_matrix(ids, anchors, config, args.distance_block_size)
-        fitted = DBSCAN(eps=args.eps, min_samples=args.min_samples, metric='precomputed', algorithm='brute', n_jobs=1).fit(matrix)
-        for label in sorted(set(int(value) for value in fitted.labels_ if value >= 0)):
-            members = phase_rows.iloc[np.flatnonzero(fitted.labels_ == label)].copy()
-            core_positions = fitted.core_sample_indices_[fitted.labels_[fitted.core_sample_indices_] == label]
-            core_ids = np.asarray(ids, dtype=object)[core_positions]
-            deduplicated = (members.sort_values(['flight_id', 'ordinal', 'segment_id'], kind='stable')
-                             .drop_duplicates('flight_id', keep='first'))
-            if deduplicated['flight_id'].nunique() < args.min_reference_flights:
-                exclusions.extend(_exclusion_rows(members, 'deleted_group_insufficient_reference_flights'))
-                continue
-            provisional.append((str(phase), str(label), members, core_ids, deduplicated['segment_id'].astype(str).to_numpy()))
-        noise = phase_rows.iloc[np.flatnonzero(fitted.labels_ < 0)]
-        exclusions.extend(_exclusion_rows(noise, 'dbscan_noise'))
-    for expert_number, (phase, label, members, core_ids, reference_ids) in enumerate(provisional):
+        selected = _select_candidate(candidates, args.max_group_fraction)
+        selection_rows.extend(_selection_row(candidate, len(phase_rows), candidate is selected) for candidate in candidates)
+        provisional.extend((selected, label, positions, reference_ids)
+                           for label, positions, reference_ids in selected.effective_clusters)
+        selected_positions = set(np.concatenate([item[1] for item in selected.effective_clusters]).tolist()) if selected.effective_clusters else set()
+        excluded_rows = phase_rows.iloc[sorted(set(range(len(phase_rows))) - selected_positions)]
+        exclusions.extend(_exclusion_rows(excluded_rows, 'hdbscan_noise_or_deleted_group'))
+    for expert_number, (candidate, label, positions, reference_ids) in enumerate(provisional):
+        members = normal.loc[normal['phase'].eq(candidate.phase)].iloc[positions]
         group_id = f'g{expert_number:04d}'
-        group_rows.append({'group_id': group_id, 'expert_id': expert_number, 'phase': phase, 'cluster_label': int(label),
-                           'members': len(members), 'core_members': len(core_ids), 'reference_flights': len(reference_ids)})
-        for row in members.itertuples(index=False):
-            assignments[str(row.segment_id)] = group_id
-        core_set = set(str(value) for value in core_ids)
-        for row in members.itertuples(index=False):
-            if str(row.segment_id) in core_set:
-                core_rows.append({'group_id': group_id, 'segment_id': str(row.segment_id), 'flight_id': str(row.flight_id), 'phase': phase})
+        probabilities = candidate.probabilities[positions]
+        group_rows.append({'group_id': group_id, 'expert_id': expert_number, 'phase': candidate.phase, 'cluster_label': label,
+                           'members': len(members), 'routing_members': len(members), 'reference_flights': len(reference_ids),
+                           'min_cluster_size': candidate.min_cluster_size, 'min_samples': candidate.min_samples,
+                           'mean_membership_probability': float(probabilities.mean())})
+        for position, row in enumerate(members.itertuples(index=False)):
+            segment_id = str(row.segment_id)
+            assignments[segment_id] = group_id
+            routing_rows.append({'group_id': group_id, 'segment_id': segment_id, 'flight_id': str(row.flight_id),
+                                 'phase': candidate.phase, 'membership_probability': float(probabilities[position])})
         for reference_id in reference_ids:
             row = members.loc[members['segment_id'].astype(str).eq(reference_id)].iloc[0]
             reference_rows.append({'group_id': group_id, 'segment_id': reference_id, 'flight_id': str(row.flight_id),
-                                   'phase': phase, 'ordinal': int(row.ordinal)})
+                                   'phase': candidate.phase, 'ordinal': int(row.ordinal)})
     normal_ids = set(normal['segment_id'].astype(str))
     kept_ids = set(assignments)
+    existing_exclusions = {item['segment_id'] for item in exclusions}
     for row in normal.loc[normal['segment_id'].astype(str).isin(normal_ids - kept_ids)].itertuples(index=False):
-        if not any(item['segment_id'] == str(row.segment_id) for item in exclusions):
+        if str(row.segment_id) not in existing_exclusions:
             exclusions.append({'segment_id': str(row.segment_id), 'flight_id': str(row.flight_id), 'phase': str(row.phase),
-                               'segment_label': int(row.segment_label), 'reason': 'deleted_group'})
-    return (pd.DataFrame(group_rows, columns=GROUP_COLUMNS), pd.DataFrame(core_rows, columns=CORE_COLUMNS),
-            pd.DataFrame(reference_rows, columns=REFERENCE_COLUMNS), assignments, pd.DataFrame(exclusions, columns=EXCLUSION_COLUMNS))
+                               'segment_label': int(row.segment_label), 'reason': 'hdbscan_deleted_group'})
+    return (pd.DataFrame(group_rows, columns=GROUP_COLUMNS), pd.DataFrame(routing_rows, columns=ROUTING_COLUMNS),
+            pd.DataFrame(reference_rows, columns=REFERENCE_COLUMNS), assignments,
+            pd.DataFrame(exclusions, columns=EXCLUSION_COLUMNS), pd.DataFrame(selection_rows, columns=SELECTION_COLUMNS))
 
 
 def _exclusion_rows(rows: pd.DataFrame, reason: str) -> list[dict[str, object]]:
@@ -176,7 +256,7 @@ def _route_training_targets(segments: pd.DataFrame, core: pd.DataFrame, anchors:
 
 def _route_validation_targets(segments: pd.DataFrame, core: pd.DataFrame, anchors: dict[str, np.ndarray],
                               config: DistanceConfig) -> pd.DataFrame:
-    """验证片段不参与 DBSCAN，只按同一冻结检索规则得到单专家检查点评价归属。"""
+    """验证片段不参与 HDBSCAN，只按同一冻结检索规则得到单专家检查点评价归属。"""
     cores_by_group = {group_id: rows['segment_id'].astype(str).tolist()
                       for group_id, rows in core.groupby('group_id', sort=False, observed=True)}
     phase_by_group = {str(rows['group_id'].iloc[0]): str(rows['phase'].iloc[0])
@@ -200,9 +280,11 @@ def _assignment_row(row: object, group_id: str, distance: float, mode: str) -> d
 
 
 def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
-    """以训练正常片段固定组结构，并为所有训练目标生成唯一专家归属。"""
-    if args.anchors < 1 or args.eps <= 0 or args.min_samples < 1 or args.min_reference_flights < 2 or args.distance_block_size < 1:
-        raise ValueError('anchors、eps、min-samples、min-reference-flights 和 distance-block-size 必须为有效正值；最小参考航班数至少为 2')
+    """以训练正常片段固定 HDBSCAN 组结构，并为所有训练目标生成唯一专家归属。"""
+    if (args.anchors < 1 or not args.min_cluster_sizes or min(args.min_cluster_sizes) < 2 or
+            not args.min_samples_values or min(args.min_samples_values) < 1 or not 0 < args.max_group_fraction <= 1 or
+            args.min_reference_flights < 2 or args.distance_block_size < 1):
+        raise ValueError('anchors、HDBSCAN 候选、max-group-fraction、min-reference-flights 和 distance-block-size 必须有效；最小参考航班数至少为 2')
     input_manifest = _project_path(context, args.input).resolve()
     distance_path = _project_path(context, args.distance_config).resolve()
     config = load_distance_config(distance_path)
@@ -215,15 +297,14 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
                          len(segments), len(values), len(recognized), len(normal),
                          normal.groupby('phase', observed=True).size().to_dict())
     anchors = _anchors_for_segments(recognized, values.loc[values['segment_id'].isin(recognized['segment_id'])], args.anchors)
-    context.logger.debug('已建立片段锚点：segments=%d；每段最多 anchors=%d；distance_config=%s',
-                         len(anchors), args.anchors, distance_path)
-    context.logger.info('开始对训练集正常片段进行 DBSCAN 建组：normal=%d；recognized=%d；anchors≤%d；eps=%g；min_samples=%d',
-                        len(normal), len(recognized), args.anchors, args.eps, args.min_samples)
-    groups, core, references, normal_assignments, exclusions = _fit_groups(normal, anchors, args, config)
-    context.logger.debug('DBSCAN 建组原始结果：groups=%d；core=%d；references=%d；excluded=%d',
-                         len(groups), len(core), len(references), len(exclusions))
+    candidates = _candidate_pairs(args)
+    context.logger.info('开始对训练集正常片段进行 HDBSCAN 建组：normal=%d；recognized=%d；anchors≤%d；candidates=%s；max_group_fraction=%g',
+                        len(normal), len(recognized), args.anchors, candidates, args.max_group_fraction)
+    groups, core, references, normal_assignments, exclusions, selection = _fit_groups(normal, anchors, args, config)
+    context.logger.debug('HDBSCAN 建组原始结果：groups=%d；routing_members=%d；references=%d；excluded=%d；selection=%s',
+                         len(groups), len(core), len(references), len(exclusions), selection.loc[selection['selected']].to_dict('records'))
     if groups.empty or core.empty or references.empty:
-        raise ValueError('DBSCAN 后没有满足最小正常参考航班数的有效组')
+        raise ValueError('HDBSCAN 后没有满足最小正常参考航班数的有效组')
     assignments = _route_training_targets(recognized, core, anchors, config, normal_assignments)
     if assignments.empty or assignments['segment_id'].duplicated().any() or assignments['group_id'].isna().any():
         raise ValueError('训练目标唯一归属为空、重复或不完整')
@@ -233,43 +314,51 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
     data_dir = context.staging_dir / 'data'
     data_dir.mkdir()
     groups.to_csv(data_dir / 'groups.csv', index=False, encoding='utf-8')
-    core.to_csv(data_dir / 'core_segments.csv', index=False, encoding='utf-8')
+    core.to_csv(data_dir / 'routing_segments.csv', index=False, encoding='utf-8')
     references.to_csv(data_dir / 'references.csv', index=False, encoding='utf-8')
     assignments.to_csv(data_dir / 'train_assignments.csv', index=False, encoding='utf-8')
     validation_assignments.to_csv(data_dir / 'validation_assignments.csv', index=False, encoding='utf-8')
     exclusions.to_csv(data_dir / 'exclusions.csv', index=False, encoding='utf-8')
+    selection.to_csv(data_dir / 'hdbscan_selection.csv', index=False, encoding='utf-8')
     (context.staging_dir / 'distance_config.yaml').write_bytes(distance_path.read_bytes())
-    summary = {'input_manifest': str(input_manifest), 'distance_config': str(distance_path), 'normal_training_segments': int(len(normal)),
-               'recognized_segments': int(len(recognized)), 'effective_groups': int(len(groups)), 'core_segments': int(len(core)),
+    normal_coverage = len(normal_assignments) / len(normal)
+    summary = {'input_manifest': str(input_manifest), 'distance_config': str(distance_path), 'clustering_algorithm': 'hdbscan',
+               'normal_training_segments': int(len(normal)), 'normal_training_coverage': normal_coverage,
+               'recognized_segments': int(len(recognized)), 'effective_groups': int(len(groups)), 'routing_segments': int(len(core)),
                'reference_segments': int(len(references)), 'train_targets': int(len(assignments)),
                'abnormal_train_targets': int(assignments['segment_label'].sum()), 'validation_targets': int(len(validation_assignments)),
                'excluded_normal_segments': int(len(exclusions))}
-    context.logger.info('分组完成：有效组=%d；参考=%d；训练目标=%d（异常=%d）；排除正常=%d', summary['effective_groups'],
-                        summary['reference_segments'], summary['train_targets'], summary['abnormal_train_targets'], summary['excluded_normal_segments'])
+    context.logger.info('分组完成：有效组=%d；参考=%d；正常覆盖率=%.2f%%；训练目标=%d（异常=%d）；排除正常=%d',
+                        summary['effective_groups'], summary['reference_segments'], normal_coverage * 100,
+                        summary['train_targets'], summary['abnormal_train_targets'], summary['excluded_normal_segments'])
     return ModuleResult(summary=summary, dependencies=(input_manifest,))
 
 
 def validate_outputs(context: RunContext, args: argparse.Namespace, result: ModuleResult) -> ValidationReport:
-    """重新读取 S1，核验参考全正常、同源去重和训练唯一归属。"""
+    """重新读取 S1，核验 HDBSCAN 参考、候选选择和训练唯一归属。"""
     data_dir = context.staging_dir / 'data'
     groups = pd.read_csv(data_dir / 'groups.csv', dtype={'group_id': 'string'})
-    core = pd.read_csv(data_dir / 'core_segments.csv', dtype={'group_id': 'string', 'segment_id': 'string', 'flight_id': 'string'})
+    core = pd.read_csv(data_dir / 'routing_segments.csv', dtype={'group_id': 'string', 'segment_id': 'string', 'flight_id': 'string'})
     references = pd.read_csv(data_dir / 'references.csv', dtype={'group_id': 'string', 'segment_id': 'string', 'flight_id': 'string'})
     assignments = pd.read_csv(data_dir / 'train_assignments.csv', dtype={'segment_id': 'string', 'group_id': 'string'})
     validation = pd.read_csv(data_dir / 'validation_assignments.csv', dtype={'segment_id': 'string', 'group_id': 'string'})
     exclusions = pd.read_csv(data_dir / 'exclusions.csv', dtype={'segment_id': 'string'})
+    selection = pd.read_csv(data_dir / 'hdbscan_selection.csv')
     if groups.empty or groups['group_id'].duplicated().any() or core.empty or references.empty:
-        raise ValueError('有效组、核心片段或参考片段为空')
+        raise ValueError('有效组、路由片段或参考片段为空')
     if not set(core['group_id']).issubset(set(groups['group_id'])) or not set(references['group_id']).issubset(set(groups['group_id'])):
-        raise ValueError('核心或参考片段指向不存在的组')
+        raise ValueError('路由或参考片段指向不存在的组')
     if references.duplicated(['group_id', 'flight_id']).any() or references.groupby('group_id')['flight_id'].nunique().lt(args.min_reference_flights).any():
         raise ValueError('正常参考没有按同源航班去重或数量不足')
+    if selection.empty or selection.groupby('phase')['selected'].sum().ne(1).any() or not selection['coverage'].between(0, 1).all():
+        raise ValueError('HDBSCAN 候选选择记录缺失或无效')
     if assignments.empty or assignments['segment_id'].duplicated().any() or not set(assignments['group_id']).issubset(set(groups['group_id'])):
         raise ValueError('训练目标没有唯一有效专家归属')
     if validation['segment_id'].duplicated().any() or not set(validation['group_id']).issubset(set(groups['group_id'])):
         raise ValueError('验证片段没有唯一有效专家归属')
     if set(assignments.loc[assignments['segment_label'].eq(0), 'segment_id']) & set(exclusions['segment_id']):
         raise ValueError('被排除正常片段不能同时成为训练目标')
-    return ValidationReport(checks={'groups': int(len(groups)), 'core_segments': int(len(core)), 'references': int(len(references)),
-                                    'train_targets': int(len(assignments)), 'normal_reference_deduplicated': True,
-                                    'validation_targets': int(len(validation)), 'unique_training_assignment': True})
+    return ValidationReport(checks={'groups': int(len(groups)), 'routing_segments': int(len(core)), 'references': int(len(references)),
+                                    'hdbscan_selection_rows': int(len(selection)), 'train_targets': int(len(assignments)),
+                                    'normal_reference_deduplicated': True, 'validation_targets': int(len(validation)),
+                                    'unique_training_assignment': True})
