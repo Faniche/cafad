@@ -51,10 +51,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--input', required=True, type=Path, help='segment 模块已发布的 manifest.json')
     parser.add_argument('--distance-config', required=True, type=Path, help='schema_version=1 的片段距离 JSON/YAML')
     parser.add_argument('--anchors', type=int, default=8, help='每片段实际锚点的最大数量')
-    parser.add_argument('--min-cluster-sizes', nargs='+', type=int, default=(4, 8, 12),
-                        help='自动搜索的 HDBSCAN 最小稳定簇片段数（默认：4 8 12）')
-    parser.add_argument('--min-samples-values', nargs='+', type=int, default=(2, 4),
-                        help='自动搜索的 HDBSCAN 局部密度保守度（默认：2 4）')
+    parser.add_argument('--min-cluster-sizes', nargs='+', type=int, default=(4, 8, 12, 16, 24, 32, 48, 64),
+                        help='自动搜索的 HDBSCAN 最小稳定簇片段数（默认：4 8 12 16 24 32 48 64）')
+    parser.add_argument('--min-samples-values', nargs='+', type=int, default=(1, 2, 4, 8, 12, 16),
+                        help='自动搜索的 HDBSCAN 局部密度保守度（默认：1 2 4 8 12 16）')
     parser.add_argument('--min-group-members', type=int, default=12,
                         help='有效组至少保留的正常训练片段数（默认 12，保证专家具备基本训练样本）')
     parser.add_argument('--max-group-fraction', type=float, default=1.0,
@@ -116,9 +116,9 @@ def _distance_matrix(segment_ids: list[str], anchors: dict[str, np.ndarray], con
 
 
 def _candidate_pairs(args: argparse.Namespace) -> tuple[tuple[int, int], ...]:
-    """返回去重且稳定排序的有限 HDBSCAN 候选网格。"""
+    """返回去重且稳定排序的有限 HDBSCAN 候选网格，避免密度门槛高于最小稳定簇规模。"""
     return tuple((size, samples) for size in sorted(set(args.min_cluster_sizes))
-           for samples in sorted(set(args.min_samples_values)))
+           for samples in sorted(set(args.min_samples_values)) if samples <= size)
 
 
 def _fit_candidate(phase: str, phase_rows: pd.DataFrame, matrix: np.ndarray, min_cluster_size: int,
