@@ -80,3 +80,11 @@ class Env:
         if workers < 1:
             raise ValueError('floor(nproc * data_proc_usage) is zero; increase the configured budget')
         return workers
+
+    @staticmethod
+    def local_plot_workers() -> int:
+        """返回本机离线绘图允许使用的 CPU 进程上限。"""
+        workers = Env.get_int('local_cpu_available_cpu')
+        if workers < 1:
+            raise ValueError('local_cpu_available_cpu 必须为正整数')
+        return workers
