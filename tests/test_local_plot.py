@@ -15,7 +15,7 @@ class LocalPlotTests(unittest.TestCase):
     """验证本地数据目录内的分组成员能被 Python 图形后端读取。"""
 
     def test_renders_segment_and_whole_flight_views(self) -> None:
-        """routing 元数据、点映射和规范观测共同生成 PNG，而不依赖浏览器绘图。"""
+        """routing 元数据、点映射和规范观测共同生成 SVG，而不依赖浏览器绘图。"""
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             observations = root / 'input_observations.csv'
@@ -32,10 +32,10 @@ class LocalPlotTests(unittest.TestCase):
             self.assertEqual(index.group_ids, ('g1', 'g2'))
             self.assertEqual(segment_choices(index, 'g1'), ('s1',))
             image, summary = render_plot(observations, index, 'g1', 's1', False, workers=1)
-            self.assertTrue(image.startswith(b'\x89PNG'))
+            self.assertIn(b'<svg', image)
             self.assertEqual(summary['path_count'], 1)
             image, summary = render_plot(observations, index, 'g1', None, True, workers=1)
-            self.assertTrue(image.startswith(b'\x89PNG'))
+            self.assertIn(b'<svg', image)
             self.assertEqual(summary['flight_count'], 1)
 
     def test_parallel_path_finalization_respects_worker_limit(self) -> None:

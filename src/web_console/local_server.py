@@ -111,10 +111,10 @@ def create_handler(state: LocalPlotState, logger: logging.Logger) -> type[BaseHT
                 state.segment_id = values.get('segment_id') if values.get('segment_id') in options else None
                 state.whole_flight = values.get('whole_flight') == '1'
                 workers = Env.local_plot_workers()
-                png, state.summary = render_plot(dataset, state.index, state.group_id, state.segment_id,
+                svg, state.summary = render_plot(dataset, state.index, state.group_id, state.segment_id,
                                                   state.whole_flight, workers)
-                state.image_data_uri = 'data:image/png;base64,' + base64.b64encode(png).decode('ascii')
-                state.message = '绘图完成。图像由 Python/Matplotlib 后端生成。'
+                state.image_data_uri = 'data:image/svg+xml;base64,' + base64.b64encode(svg).decode('ascii')
+                state.message = '绘图完成。SVG 由 Python/Matplotlib 后端生成。'
                 logger.info('本地绘图完成：groups=%s；segments=%s；flights=%s；mode=%s',
                             state.summary['group_count'], state.summary['segment_count'],
                             state.summary['flight_count'], state.summary['mode'])
@@ -143,7 +143,7 @@ def create_handler(state: LocalPlotState, logger: logging.Logger) -> type[BaseHT
 
 
 def _page_html(state: LocalPlotState) -> str:
-    """纯 HTML 表单布局：左导航、三栏内容和后端渲染的 PNG。"""
+    """纯 HTML 表单布局：左导航、三栏内容和后端渲染的 SVG。"""
     groups = state.index.group_ids if state.index is not None else ()
     segments = segment_choices(state.index, state.group_id) if state.index is not None else ()
     group_options = _options(groups, state.group_id, '全部分组')

@@ -1,4 +1,4 @@
-"""local_plot.py | 2026-11-11 | 本地分组轨迹三维绘图数据读取与 PNG 渲染 | Codex."""
+"""local_plot.py | 2026-11-11 | 本地分组轨迹三维绘图数据读取与 SVG 渲染 | Codex."""
 from __future__ import annotations
 
 from collections import defaultdict
@@ -101,7 +101,7 @@ def segment_choices(index: GroupIndex, group_id: str | None) -> tuple[str, ...]:
 
 def render_plot(dataset_path: Path, index: GroupIndex, group_id: str | None, segment_id: str | None,
                 whole_flight: bool, workers: int = 1) -> tuple[bytes, dict[str, object]]:
-    """筛选数据并由 Matplotlib 生成 PNG；前端只嵌入该静态图像。"""
+    """筛选数据并由 Matplotlib 生成 SVG；前端只嵌入该静态图像。"""
     selected = index.members
     if group_id is not None:
         selected = selected.loc[selected['group_id'].eq(group_id)]
@@ -194,7 +194,7 @@ def _downsample(values: np.ndarray) -> np.ndarray:
 
 
 def _draw(paths: dict[str, np.ndarray], color_by_segment: dict[str, str], whole_flight: bool) -> bytes:
-    """绘制经度、纬度、几何高度三轴折线，并返回 PNG 字节。"""
+    """绘制经度、纬度、几何高度三轴折线，并返回 SVG 字节。"""
     figure = plt.figure(figsize=(10, 7), constrained_layout=True)
     axis = figure.add_subplot(projection='3d')
     groups = sorted(set(color_by_segment.values()))
@@ -208,6 +208,6 @@ def _draw(paths: dict[str, np.ndarray], color_by_segment: dict[str, str], whole_
     axis.set_zlabel('Geometric altitude (m)')
     axis.set_title(f"{'Whole flights' if whole_flight else 'Flight-phase segments'}: {len(paths)} paths")
     buffer = BytesIO()
-    figure.savefig(buffer, format='png', dpi=110)
+    figure.savefig(buffer, format='svg')
     plt.close(figure)
     return buffer.getvalue()
