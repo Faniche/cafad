@@ -5,6 +5,7 @@ torch
 numpy
 pandas
 scipy
+scikit-learn
 
 # Visualization
 matplotlib
@@ -14,3 +15,4 @@ plotly
 pyyaml
 
 openpyxl
+optuna>=4,<5

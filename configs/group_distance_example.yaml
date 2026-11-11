@@ -1,0 +1,9 @@
+# 必须复制后按数据集与验证集调参；不使用测试集选择这些值。
+schema_version: 1
+# absolute：绝对时间差；time_of_day：统一时区的一天内周期时间差。
+time_mode: absolute
+sigma_time_s: 3600.0
+sigma_space_m: 10000.0
+sigma_heading_rad: 0.5235987755982988
+aggregation: mean
+earth_radius_m: 6371000.0

@@ -1,0 +1,67 @@
+# 仅用于联调和初步实验的事件化注入协议；正式实验须复制、冻结并在论文中报告其 SHA-256。
+# 最低航班点数由根 .env 的 injection_minimum_trajectory_points 统一控制。
+# 当前 40 点 = 最长 30 点事件 + 前后各 5 个不改动的正常上下文点。
+schema_version: 2
+event_length_points: [15, 30]
+context_points_each_side: 5
+
+# 每条合格异常轨迹仅生成一个主事件，故默认不存在事件重叠。
+event_type_probabilities:
+  gaussian_point: 0.10
+  reported_fixed_offset: 0.15
+  reported_progressive_drift: 0.15
+  reported_local_perturbation: 0.25
+  true_local_maneuver: 0.20
+  motion_transfer: 0.15
+
+# 单点报送失真；下限使高度或速度为零时仍可产生真实改动。
+gaussian_point:
+  speed_probability: 0.50
+  speed_std_fraction: 0.005
+  speed_std_floor_mps: 0.50
+  speed_std_cap_mps: 50.0
+  altitude_std_fraction: 0.005
+  altitude_std_floor_m: 1.0
+  altitude_std_cap_m: 50.0
+
+# DAE 的 OFFSET 思想：修改报送字段，不伪造相应的运动学一致性。
+reported_fixed_offset:
+  field_probabilities:
+    lateral_position: 0.40
+    altitude: 0.30
+    speed: 0.30
+  lateral_offset_m_range: [300.0, 1300.0]
+  altitude_offset_m_range: [60.0, 350.0]
+  speed_offset_mps_range: [5.0, 30.0]
+
+# DAE 的 DRIFT 思想：第 k 个点的累计偏移为 k × step，符号随机。
+reported_progressive_drift:
+  field_probabilities:
+    altitude: 0.50
+    speed: 0.50
+  altitude_step_m_range: [2.0, 10.0]
+  speed_step_mps_range: [0.2, 1.0]
+
+# 既有连续速度／位置／高度扰动的报送失真版本，不重算速度与航向。
+reported_local_perturbation:
+  field_probabilities:
+    speed: 0.30
+    lateral_position: 0.40
+    altitude: 0.30
+  speed_factor_range: [0.80, 1.25]
+  lateral_offset_m_range: [300.0, 1300.0]
+  altitude_amplitude_m_range: [60.0, 350.0]
+  smoothing_points: 4
+
+# 真实局部运动异常：位置改变时同步重算速度和航向；高度变化保留两个高度字段的一致性。
+true_local_maneuver:
+  field_probabilities:
+    lateral_position: 0.70
+    altitude: 0.30
+  lateral_offset_m_range: [300.0, 1300.0]
+  altitude_amplitude_m_range: [60.0, 350.0]
+  smoothing_points: 4
+
+# Fried & Last 的真实运动片段迁移思想：从同 split、异源航班抽取连续供体增量。
+motion_transfer:
+  scale_range: [0.75, 1.25]

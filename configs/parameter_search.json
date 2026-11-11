@@ -1,0 +1,34 @@
+{
+  "study_name": "d1_random20_tpe_bf16_v3",
+  "group_manifest": "data/4_group/preprocessed_data_d1/4#20261109_005829#42/manifest.json",
+  "random_trials": 20,
+  "tpe_trials": 20,
+  "search_seed": 20261109,
+  "training_seed": 42,
+  "gpus": "0,1,2,3",
+  "train_fixed": {
+    "branch_heads": 4,
+    "group_layers": 1,
+    "group_heads": 4,
+    "pool_heads": 4,
+    "memory_slots": 8,
+    "ref_limit": 16,
+    "batch_size": 16,
+    "micro_batch_size": 4,
+    "epochs": 15,
+    "patience": 3,
+    "min_delta": 0.0001,
+    "grad_clip": 1.0,
+    "precision": "bf16",
+    "ablation": "none"
+  },
+  "space": {
+    "d_model": {"choices": [32, 64, 128]},
+    "branch_layers": {"choices": [1, 2, 3]},
+    "learning_rate": {"low": 0.00001, "high": 0.001, "log": true},
+    "dropout": {"choices": [0.0, 0.1, 0.2, 0.3]},
+    "weight_decay": {"low": 0.00001, "high": 0.01, "log": true}
+  },
+  "calibrate": {"top_r": 3, "temperature": 1.0, "score_task_size": 32},
+  "detect": {"split": "val", "score_task_size": 32}
+}
