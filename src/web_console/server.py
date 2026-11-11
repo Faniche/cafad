@@ -5,6 +5,9 @@ import argparse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
+import sys
+from time import sleep
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import parse_qs, urlparse
@@ -14,12 +17,19 @@ from src.utils.logging_utils import close_project_logging, setup_project_logging
 from src.utils.strings import PathUtils
 from .auth import SESSION_TTL_SECONDS, SessionAuthenticator
 from .file_browser import FileBrowserError, browser_roots, list_directory
-from .service import JobManager, build_command, module_schemas, serialize_schemas
+from .history import delete_history_run, history_detail, list_module_history
+from .restart import RestartController
+from .train_monitor import training_progress
+from .train_util import TrainTaskQueue
+from .web_util import ModuleHistoryUtil
+from .group_view import group_result
+from .service import JobManager, build_command, module_catalog, module_schemas, serialize_schemas, upstream_manifest_choices
 
 
 STATIC_DIR = Path(__file__).resolve().parent / 'static'
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_FORM_STATE_BYTES = 48 * 1024
+RESTART_DELAY_SECONDS = 5
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -80,12 +90,20 @@ def _static_response(handler: BaseHTTPRequestHandler, relative_path: str, conten
     handler.wfile.write(data)
 
 
-def create_handler(project_root: Path, manager: JobManager, access_token: str) -> type[BaseHTTPRequestHandler]:
+def create_handler(
+    project_root: Path,
+    manager: JobManager,
+    access_token: str,
+    restart: RestartController | None = None,
+    train_queue: TrainTaskQueue | None = None,
+) -> type[BaseHTTPRequestHandler]:
     """创建绑定项目、会话认证、受限资源浏览和任务管理器的 HTTP Handler。"""
     schemas = module_schemas()
     schema_json = serialize_schemas(schemas)
+    catalog = module_catalog()
     authenticator = SessionAuthenticator(access_token)
     roots = browser_roots(project_root)
+    history_cache = {module: ModuleHistoryUtil.query(project_root, module) for module in catalog}
 
     class ConsoleHandler(BaseHTTPRequestHandler):
         """先登录，再提供表单 schema、文件选择、任务启动和日志读取。"""
@@ -98,6 +116,9 @@ def create_handler(project_root: Path, manager: JobManager, access_token: str) -
             if parsed.path == '/static/app.js':
                 _static_response(self, 'app.js', 'text/javascript; charset=utf-8')
                 return
+            if parsed.path == '/static/group_view.js':
+                _static_response(self, 'group_view.js', 'text/javascript; charset=utf-8')
+                return
             if parsed.path == '/static/style.css':
                 _static_response(self, 'style.css', 'text/css; charset=utf-8')
                 return
@@ -107,13 +128,54 @@ def create_handler(project_root: Path, manager: JobManager, access_token: str) -
             if not self._authorized_response(True):
                 return
             if parsed.path == '/api/schema':
-                _json_response(self, HTTPStatus.OK, {'modules': schema_json})
+                _json_response(self, HTTPStatus.OK, {'modules': schema_json, 'module_order': list(catalog)})
                 return
             if parsed.path == '/api/form-state':
                 self._form_state_get()
                 return
             if parsed.path == '/api/files':
                 self._files_get(parse_qs(parsed.query))
+                return
+            if parsed.path == '/api/upstream-runs':
+                self._upstream_runs_get(parse_qs(parsed.query))
+                return
+            if parsed.path == '/api/history':
+                self._history_get(parse_qs(parsed.query))
+                return
+            if parsed.path == '/api/history/state':
+                module = parse_qs(parsed.query).get('module', [''])[0]
+                if module not in catalog:
+                    _json_response(self, HTTPStatus.BAD_REQUEST, {'error': '模块不存在'})
+                    return
+                latest = manager.latest_snapshot(module)
+                active = latest is not None and latest['status'] in {'running', 'stopping'}
+                if module == 'train' and train_queue is not None:
+                    active = active or train_queue.has_pending()
+                _json_response(self, HTTPStatus.OK, {'running': active or any(
+                    row['state'] == 'running' for row in list_module_history(project_root, module))})
+                return
+            if parsed.path == '/api/train/progress':
+                try:
+                    artifact = parse_qs(parsed.query).get('artifact', [None])[0]
+                    _json_response(self, HTTPStatus.OK, training_progress(project_root, artifact))
+                except (ValueError, OSError) as exc:
+                    _json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
+                return
+            if parsed.path == '/api/train/queue':
+                if train_queue is None:
+                    _json_response(self, HTTPStatus.NOT_IMPLEMENTED, {'error': '当前服务未启用训练队列'})
+                else:
+                    _json_response(self, HTTPStatus.OK, train_queue.snapshot())
+                return
+            if parsed.path == '/api/history/detail':
+                self._history_detail_get(parse_qs(parsed.query))
+                return
+            if parsed.path == '/api/group/result':
+                try:
+                    artifact = parse_qs(parsed.query).get('artifact', [''])[0]
+                    _json_response(self, HTTPStatus.OK, group_result(project_root, artifact))
+                except (ValueError, OSError, KeyError) as exc:
+                    _json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
                 return
             if parsed.path == '/api/jobs/latest':
                 self._latest_job_get(parse_qs(parsed.query))
@@ -125,11 +187,51 @@ def create_handler(project_root: Path, manager: JobManager, access_token: str) -
 
         def do_POST(self) -> None:
             path = urlparse(self.path).path
+            if path in ('/api/search/random', '/api/search/tpe'):
+                if not self._authorized_response(True):
+                    return
+                try:
+                    mode = path.rsplit('/', 1)[1]
+                    command = (sys.executable, str(project_root / 'scripts/parameter_search.py'), '--mode', mode)
+                    job = manager.start(command, 'search_' + mode)
+                    _json_response(self, HTTPStatus.ACCEPTED, manager.snapshot(job.job_id))
+                except (ValueError, RuntimeError) as exc:
+                    _json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
+                return
             if path == '/api/auth/login':
                 self._login()
                 return
             if path == '/api/auth/logout':
                 self._logout()
+                return
+            if path == '/api/server/restart':
+                self._restart()
+                return
+            if path.startswith('/api/jobs/') and path.endswith('/stop'):
+                if not self._authorized_response(True):
+                    return
+                self._job_stop(path)
+                return
+            if path == '/api/train/queue':
+                if not self._authorized_response(True):
+                    return
+                if train_queue is None:
+                    _json_response(self, HTTPStatus.NOT_IMPLEMENTED, {'error': '当前服务未启用训练队列'})
+                    return
+                try:
+                    payload = _read_json(self)
+                    if payload.get('module') != 'train':
+                        raise ValueError('训练队列只接受 train 模块')
+                    auto_go = payload.pop('auto_go', False)
+                    if not isinstance(auto_go, bool):
+                        raise ValueError('auto_go 必须为布尔值')
+                    command = build_command(project_root, payload, schemas)
+                    entry = ModuleHistoryUtil.from_command(command)
+                    result = train_queue.enqueue_train(command, auto_go)
+                    result['history_entry'] = entry
+                    _json_response(self, HTTPStatus.ACCEPTED, result)
+                except (ValueError, RuntimeError) as exc:
+                    _json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
                 return
             if path != '/api/jobs':
                 _json_response(self, HTTPStatus.NOT_FOUND, {'error': '路由不存在'})
@@ -141,10 +243,23 @@ def create_handler(project_root: Path, manager: JobManager, access_token: str) -
                 command = build_command(project_root, payload, schemas)
                 module_name = payload['module']
                 assert isinstance(module_name, str)  # build_command 已验证模块名。
+                entry = ModuleHistoryUtil.from_command(command)
                 job = manager.start(command, module_name)
-                _json_response(self, HTTPStatus.ACCEPTED, manager.snapshot(job.job_id))
+                snapshot = manager.snapshot(job.job_id)
+                snapshot['history_entry'] = entry
+                _json_response(self, HTTPStatus.ACCEPTED, snapshot)
             except (ValueError, RuntimeError) as exc:
                 _json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
+
+        def do_DELETE(self) -> None:
+            """删除一条历史运行以及由它显式派生的下游目录。"""
+            parsed = urlparse(self.path)
+            if parsed.path != '/api/history':
+                _json_response(self, HTTPStatus.NOT_FOUND, {'error': '路由不存在'})
+                return
+            if not self._authorized_response(True):
+                return
+            self._history_delete(parse_qs(parsed.query))
 
         def do_PUT(self) -> None:
             """保存当前会话的非敏感表单配置；令牌从不属于该状态。"""
@@ -194,6 +309,25 @@ def create_handler(project_root: Path, manager: JobManager, access_token: str) -
                 {'Set-Cookie': SessionAuthenticator.make_set_cookie(None, 0)},
             )
 
+        def _restart(self) -> None:
+            """仅空闲控制台可自行重启，避免丢失仍在运行任务的停止能力。"""
+            if not self._authorized_response(True):
+                return
+            if restart is None:
+                _json_response(self, HTTPStatus.NOT_IMPLEMENTED, {'error': '当前服务未启用网页重启'})
+                return
+            if manager.has_active_job() or (train_queue is not None and train_queue.has_pending()):
+                _json_response(self, HTTPStatus.CONFLICT, {'error': '当前仍有网页任务运行、停止中或排队，不能重启控制台'})
+                return
+            if not restart.request():
+                _json_response(self, HTTPStatus.CONFLICT, {'error': '控制台重启已在进行中'})
+                return
+            _json_response(self, HTTPStatus.ACCEPTED, {
+                'restarting': True,
+                'delay_seconds': RESTART_DELAY_SECONDS,
+                'message': f'控制台将在 {RESTART_DELAY_SECONDS} 秒后以当前磁盘代码重启；需重新登录。',
+            })
+
         def _authorized_response(self, send_error: bool) -> bool:
             """检查短期会话；未登录请求不能读取 schema、资源或任务信息。"""
             authenticated = authenticator.is_session_valid(self.headers.get('Cookie'))
@@ -210,6 +344,68 @@ def create_handler(project_root: Path, manager: JobManager, access_token: str) -
             except FileBrowserError as exc:
                 _json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
 
+        def _upstream_runs_get(self, query: dict[str, list[str]]) -> None:
+            """返回当前模块一个已声明上游输入可选的成功运行目录。"""
+            module_name = query.get('module', [''])[0]
+            argument_name = query.get('argument', [''])[0]
+            if module_name not in schemas:
+                _json_response(self, HTTPStatus.BAD_REQUEST, {'error': '模块不存在或尚未实现'})
+                return
+            try:
+                choices = upstream_manifest_choices(project_root, module_name, argument_name)
+            except ValueError as exc:
+                _json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
+                return
+            _json_response(self, HTTPStatus.OK, {'runs': choices})
+
+        def _history_get(self, query: dict[str, list[str]]) -> None:
+            """读取一个模块的磁盘历史；不同页面不会再共享内存中的旧控制台输出。"""
+            module_name = query.get('module', [''])[0]
+            if module_name not in catalog:
+                _json_response(self, HTTPStatus.BAD_REQUEST, {'error': '模块不存在'})
+                return
+            latest = manager.latest_snapshot(module_name)
+            active = latest is not None and latest['status'] in {'running', 'stopping'}
+            if module_name == 'train' and train_queue is not None:
+                active = active or train_queue.has_pending()
+            if query.get('refresh') == ['1'] and active:
+                _json_response(self, HTTPStatus.CONFLICT, {'error': '当前模块仍在运行，完成后才能刷新历史'})
+                return
+            history_cache[module_name] = ModuleHistoryUtil.query(project_root, module_name)
+            response = dict(history_cache[module_name])
+            response['running'] = active or response['running']
+            if query.get('refresh') == ['1'] and response['running']:
+                _json_response(self, HTTPStatus.CONFLICT, {'error': '当前模块有未结束产物，完成后才能刷新历史'})
+                return
+            _json_response(self, HTTPStatus.OK, response)
+
+        def _history_detail_get(self, query: dict[str, list[str]]) -> None:
+            """展开一条历史运行的摘要、失败信息和日志尾部。"""
+            module_name = query.get('module', [''])[0]
+            artifact = query.get('artifact', [''])[0]
+            if module_name not in catalog:
+                _json_response(self, HTTPStatus.BAD_REQUEST, {'error': '模块不存在'})
+                return
+            try:
+                _json_response(self, HTTPStatus.OK, history_detail(project_root, module_name, artifact))
+            except ValueError as exc:
+                _json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
+
+        def _history_delete(self, query: dict[str, list[str]]) -> None:
+            """删除前禁止并行正式运行，防止删除器与发布器争用相同目录。"""
+            module_name = query.get('module', [''])[0]
+            artifact = query.get('artifact', [''])[0]
+            if module_name not in catalog:
+                _json_response(self, HTTPStatus.BAD_REQUEST, {'error': '模块不存在'})
+                return
+            if manager.has_active_job() or (train_queue is not None and train_queue.has_pending()):
+                _json_response(self, HTTPStatus.CONFLICT, {'error': '当前有网页任务在运行或停止中，暂不能删除历史产物'})
+                return
+            try:
+                _json_response(self, HTTPStatus.OK, {'deleted': delete_history_run(project_root, module_name, artifact)})
+            except ValueError as exc:
+                _json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
+
         def _form_state_get(self) -> None:
             """读取当前登录会话的表单状态，供刷新与导航后恢复。"""
             state = authenticator.load_form_state(self.headers.get('Cookie'))
@@ -221,10 +417,29 @@ def create_handler(project_root: Path, manager: JobManager, access_token: str) -
         def _latest_job_get(self, query: dict[str, list[str]]) -> None:
             """返回当前模块最后一次网页任务；没有记录时不伪造空任务。"""
             module_name = query.get('module', [''])[0]
-            if module_name not in schemas:
-                _json_response(self, HTTPStatus.BAD_REQUEST, {'error': '模块不存在或尚未实现'})
+            if module_name not in (*catalog, 'search_random', 'search_tpe'):
+                _json_response(self, HTTPStatus.BAD_REQUEST, {'error': '模块不存在'})
                 return
-            _json_response(self, HTTPStatus.OK, {'job': manager.latest_snapshot(module_name)})
+            job = manager.latest_snapshot(module_name)
+            # 搜索持有整个四步流水线的进程组；必须停止父任务，避免又启动下一轮。
+            if module_name == 'train':
+                if train_queue is not None:
+                    active_job_id = train_queue.active_job_id()
+                    if active_job_id is not None:
+                        job = manager.snapshot(active_job_id)
+                for search_module in ('search_random', 'search_tpe'):
+                    search_job = manager.latest_snapshot(search_module)
+                    if search_job is not None and search_job['status'] in {'running', 'stopping'}:
+                        job = search_job
+                        break
+            response = {'job': job}
+            if job is None and module_name.startswith('search_'):
+                files = sorted((project_root / 'logs').glob(f"search-{module_name[7:]}-*.log"))
+                if files:
+                    with files[-1].open('rb') as reader:
+                        reader.seek(max(0, files[-1].stat().st_size - 96000))
+                        response['logs'] = reader.read().decode('utf-8', errors='replace')
+            _json_response(self, HTTPStatus.OK, response)
 
         def _job_get(self, path: str, query: dict[str, list[str]]) -> None:
             """读取受限任务的快照或自指定偏移起的日志。"""
@@ -242,6 +457,17 @@ def create_handler(project_root: Path, manager: JobManager, access_token: str) -
                     return
                 after_text = query.get('after', ['0'])[0]
                 _json_response(self, HTTPStatus.OK, manager.logs_after(job_id, int(after_text)))
+            except (KeyError, ValueError) as exc:
+                _json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
+
+        def _job_stop(self, path: str) -> None:
+            """处理 `/api/jobs/<id>/stop`，保持其他任务路由不带副作用。"""
+            pieces = path.strip('/').split('/')
+            if len(pieces) != 4 or pieces[:2] != ['api', 'jobs'] or pieces[3] != 'stop':
+                _json_response(self, HTTPStatus.NOT_FOUND, {'error': '路由不存在'})
+                return
+            try:
+                _json_response(self, HTTPStatus.ACCEPTED, manager.stop(pieces[2]))
             except (KeyError, ValueError) as exc:
                 _json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
 
@@ -270,6 +496,7 @@ def run_server(host: str) -> None:
     """创建会话登录保护的控制台服务并在前台持续运行。"""
     project_root = PathUtils.get_project_root()
     logger, log_path = setup_project_logging(project_root=project_root, name='cafad.web_console')
+    restart_requested = False
     try:
         Env.load(project_root / '.env')
         access_token = Env.get('web_console_token')
@@ -279,9 +506,15 @@ def run_server(host: str) -> None:
         if not 1 <= port <= 65535:
             raise ValueError('web_console_port 必须在 1 到 65535 之间')
         manager = JobManager(project_root, logger.info)
-        server = ThreadingHTTPServer((host, port), create_handler(project_root, manager, access_token))
+        restart = RestartController()
+        train_queue = TrainTaskQueue(manager)
+        server = ThreadingHTTPServer((host, port), create_handler(
+            project_root, manager, access_token, restart, train_queue,
+        ))
+        restart.bind_shutdown(server.shutdown)
         logger.info('Web 控制台启动：http://%s:%d；使用令牌登录和短期会话；日志=%s', host, port, log_path)
         server.serve_forever()
+        restart_requested = restart.requested
     except Exception:
         logger.exception('Web 控制台启动或运行失败')
         raise
@@ -289,6 +522,9 @@ def run_server(host: str) -> None:
         if 'server' in locals():
             server.server_close()
         close_project_logging(logger)
+    if restart_requested:
+        sleep(RESTART_DELAY_SECONDS)
+        os.execv(sys.executable, (sys.executable, *sys.argv))
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -34,6 +34,16 @@ code { color: #a5f3fc; }
 .view-panel > p { max-width: 780px; }
 .form-grid, .module-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(225px, 1fr)); gap: 16px; margin: 22px 0; }
 .module-fields { padding-top: 2px; }
+.split-configuration { grid-column: 1 / -1; padding: 18px; border: 1px solid #334155; border-radius: 8px; background: #121c2d; }
+.split-configuration h4 { margin: 0 0 12px; color: #e0f2fe; font-size: 1rem; }
+.split-configuration h4 + .split-share-grid { margin-bottom: 22px; }
+.split-share-grid { display: grid; grid-template-columns: repeat(3, minmax(120px, 1fr)); gap: 14px; max-width: 680px; }
+.split-share-grid label { display: grid; gap: 7px; color: #cbd5e1; font-size: .92rem; }
+.split-plan-table { width: min(680px, 100%); margin: 0 0 13px; border-collapse: collapse; }
+.split-plan-table th, .split-plan-table td { padding: 9px; border: 1px solid #334155; text-align: center; }
+.split-plan-table th { color: #dbeafe; font-weight: 600; }
+.split-plan-table th[scope="row"] { text-align: left; }
+.split-plan-table input { min-width: 74px; text-align: center; }
 .field { display: grid; gap: 7px; color: #cbd5e1; font-size: .92rem; }
 .field.full { grid-column: 1 / -1; }
 .field b { color: #fb7185; }
@@ -48,9 +58,17 @@ input:focus, select:focus { outline: 2px solid #38bdf8; outline-offset: 1px; }
 .form-status { min-height: 1.2em; color: #fda4af; }
 .output-heading { display: flex; justify-content: space-between; gap: 20px; align-items: center; }
 .output-heading h3 { margin: 0; }
+.job-meta { display: flex; align-items: center; gap: 14px; }
+#run-elapsed { color: #cbd5e1; font: .85rem ui-monospace, Consolas, monospace; }
 #job-status { color: #7dd3fc; font-family: ui-monospace, Consolas, monospace; font-size: .85rem; }
 .command { overflow-wrap: anywhere; font-family: ui-monospace, Consolas, monospace; font-size: .83rem; color: #a5f3fc; }
 #logs { min-height: 230px; max-height: 520px; margin: 14px 0 0; overflow: auto; padding: 16px; border-radius: 6px; background: #020617; color: #d1fae5; font: .82rem/1.48 ui-monospace, Consolas, monospace; white-space: pre-wrap; }
+.history-table { width: 100%; margin-top: 14px; border-collapse: collapse; }
+.history-table th, .history-table td { padding: 8px; border: 1px solid #334155; text-align: left; overflow-wrap: anywhere; }
+.history-table button { padding: 6px 10px; }
+#history-detail { margin-top: 20px; }
+#history-detail h4 { margin: 18px 0 8px; }
+.history-text { max-height: 360px; margin: 0; overflow: auto; padding: 12px; background: #020617; color: #d1fae5; font: .82rem/1.48 ui-monospace, Consolas, monospace; white-space: pre-wrap; }
 dialog { width: min(760px, calc(100% - 28px)); padding: 0; border: 1px solid #475569; border-radius: 10px; background: #172033; color: #edf2f7; box-shadow: 0 20px 65px #020617cc; }
 dialog::backdrop { background: #020617aa; }
 .dialog-heading { display: flex; justify-content: space-between; gap: 20px; align-items: start; padding: 24px 24px 0; }
@@ -66,6 +84,12 @@ dialog::backdrop { background: #020617aa; }
 .browser-entries { max-height: 360px; margin: 0 24px; overflow: auto; border: 1px solid #334155; border-radius: 7px; background: #0f172a; }
 .browser-entry { display: flex; min-height: 44px; justify-content: space-between; gap: 16px; align-items: center; padding: 7px 11px; border-bottom: 1px solid #243044; }
 .browser-entry:last-child { border-bottom: 0; }
+#train-monitor th:first-child, #train-monitor td:first-child { position: sticky; left: 0; background: #172033; z-index: 1; white-space: nowrap; }
+#train-monitor td { white-space: nowrap; }
+.table-scroll { overflow-x: auto; max-width: 100%; }
+.table-scroll td, .table-scroll th { white-space: nowrap; }
+#history-head th:last-child, #history-rows td:last-child { position: sticky; right: 0; background: #172033; }
+#group-result canvas { width: 100%; height: 460px; background: #0f172a; touch-action: none; }
 .browser-name { min-width: 0; overflow-wrap: anywhere; color: #e2e8f0; }
 .browser-entry button { padding: 6px 10px; }
 .dialog-actions { display: flex; justify-content: end; gap: 10px; padding: 18px 24px 24px; }

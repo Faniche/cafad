@@ -26,6 +26,9 @@
         <button id="global-nav" class="nav-item selected" type="button">总体设置</button>
         <p class="nav-label">项目模块</p>
         <div id="module-nav"></div>
+        <p class="nav-label">参数寻优</p>
+        <button id="search-random-nav" class="nav-item" type="button">随机搜索</button>
+        <button id="search-tpe-nav" class="nav-item" type="button">TPE</button>
       </nav>
       <p class="sidebar-note">每次只能启动一个模块；模块参数来自实际 <code>api.py</code>。</p>
     </aside>
@@ -33,9 +36,14 @@
     <main class="workspace">
       <header class="workspace-header">
         <div><p id="view-kicker" class="eyebrow">全局运行配置</p><h2 id="view-title">总体设置</h2></div>
-        <div class="session-actions"><span>已登录</span><button id="logout-button" class="secondary" type="button">退出登录</button></div>
+        <div class="session-actions"><span>已登录</span><button id="restart-button" class="secondary" type="button">重启控制台</button><button id="logout-button" class="secondary" type="button">退出登录</button></div>
       </header>
 
+      <section id="search-view" class="panel" hidden>
+        <p id="search-note"></p>
+        <button id="search-start" type="button">启动模块</button>
+        <button id="search-stop" class="secondary" type="button" disabled>停止搜索及子进程</button>
+      </section>
       <form id="settings-form">
         <section id="global-view" class="panel view-panel">
           <h3>运行参数</h3>
@@ -48,12 +56,37 @@
           <h3 id="module-heading"></h3>
           <p id="module-description">参数由模块 <code>api.py</code> 的实际 argparse 定义生成。</p>
           <div class="module-fields" id="module-fields"></div>
-          <div class="actions"><button id="run-button" type="submit">启动模块</button><span id="form-status" class="form-status" role="status"></span></div>
+          <div class="actions"><button id="run-button" type="submit">启动模块</button><button id="train-queue-button" class="secondary" type="button" hidden>添加任务</button><button id="stop-button" class="secondary" type="button" disabled>停止运行</button><span id="form-status" class="form-status" role="status"></span></div>
         </section>
       </form>
 
+      <section id="train-monitor" class="panel" hidden>
+        <div class="output-heading"><h3>训练进度</h3><button id="train-monitor-latest" class="secondary" type="button">查看最新训练</button></div>
+        <p id="train-monitor-status" class="inline-note"></p>
+        <div style="overflow-x:auto"><table class="history-table">
+          <thead><tr><th>分组/专家</th><th>状态</th><th>Epoch</th><th>本阶段片段</th><th>GPU</th><th>显存 MiB<br>已分配/缓存</th><th>GPU利用率</th><th>专家耗时</th><th>训练损失</th><th>验证损失</th><th>消息距今</th></tr></thead>
+          <tbody id="train-monitor-rows"></tbody>
+        </table></div>
+        <p class="inline-note">每秒刷新。显存为该进程最近上报的 PyTorch 已分配/缓存值；GPU利用率为整卡即时值。完成专家的显存为结束快照。旧训练只显示日志已有信息。</p>
+      </section>
+      <section id="history-panel" class="panel" hidden aria-labelledby="history-title">
+        <div class="output-heading"><h3 id="history-title">历史运行</h3><button id="history-refresh" class="secondary" type="button">刷新</button></div>
+        <p id="history-status" class="inline-note"></p>
+        <div class="table-scroll"><table class="history-table">
+          <thead><tr id="history-head"></tr></thead>
+          <tbody id="history-rows"></tbody>
+        </table></div>
+        <div id="history-detail" hidden>
+          <h4>运行结果</h4>
+          <pre id="history-summary" class="history-text"></pre>
+          <div id="group-result" hidden></div>
+          <h4>日志</h4>
+          <pre id="history-logs" class="history-text"></pre>
+        </div>
+      </section>
+
       <section class="panel output-panel" aria-labelledby="output-title">
-        <div class="output-heading"><h3 id="output-title">任务输出</h3><span id="job-status">尚未启动</span></div>
+        <div class="output-heading"><h3 id="output-title">任务输出</h3><div class="job-meta"><span id="run-elapsed" hidden></span><span id="job-status">尚未启动</span></div></div>
         <p id="command" class="command">等待选择模块并提交。</p>
         <pre id="logs" aria-live="polite"></pre>
       </section>
@@ -69,6 +102,7 @@
     <div id="browser-entries" class="browser-entries" aria-live="polite"></div>
     <div class="dialog-actions"><button id="browser-select-directory" class="secondary" type="button" hidden>选择当前目录</button><button id="browser-cancel" class="secondary" type="button">取消</button></div>
   </dialog>
+  <script src="/static/group_view.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>
