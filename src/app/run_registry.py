@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 
 from .artifacts import write_json
+from .module_catalog import artifact_module_directory
 
 
 RECORD_COLUMNS = ('dataset', 'module', 'counter', 'state')
@@ -93,7 +94,8 @@ def allocate_run(project_root: Path, dataset: DatasetIdentity, module_name: str,
         'run_id': allocation.run_id,
         'seed': seed,
         'started_at': allocation.started_at.isoformat(),
-        'artifact_dir': str(Path('data') / module_name / dataset.dataset_id / allocation.directory_name),
+        'artifact_dir': (Path('data') / artifact_module_directory(module_name) / dataset.dataset_id /
+                         allocation.directory_name).as_posix(),
         'state': 'running',
     })
     write_json(registry_path, registry)

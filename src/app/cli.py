@@ -6,11 +6,13 @@ from datetime import datetime
 from importlib import import_module
 import logging
 import sys
+import time
 from types import ModuleType
 
 from .arguments import ProjectArgumentParser
 from .artifacts import ArtifactWorkspace, ProjectRunLock, write_manifest, write_run_metadata
 from .contracts import RunContext
+from .module_catalog import MODULE_SEQUENCE, artifact_module_directory
 from .run_registry import allocate_run, identify_dataset, update_run_state
 from src.utils.env import Env
 from src.utils.logging_utils import close_project_logging, setup_project_logging
@@ -20,7 +22,13 @@ from src.utils.strings import PathUtils
 IMPLEMENTED_MODULES = {
     'preprocess': 'src.modules.preprocess.api',
     'split': 'src.modules.split.api',
+    'inject': 'src.modules.inject.api',
     'segment': 'src.modules.segment.api',
+    'group': 'src.modules.group.api',
+    'train': 'src.modules.train.api',
+    'calibrate': 'src.modules.calibrate.api',
+    'detect': 'src.modules.detect.api',
+    'evaluate': 'src.modules.evaluate.api',
 }
 
 
@@ -52,12 +60,20 @@ def _module_api(module_name: str) -> ModuleType:
 
 
 def _root_help() -> str:
-    names = ', '.join(sorted(IMPLEMENTED_MODULES))
+    names = ', '.join(name for name in MODULE_SEQUENCE if name in IMPLEMENTED_MODULES)
     return ('用法：python main.py [全局参数] -m 模块名 [模块参数]\n\n'
             f'当前可用模块：{names}\n'
             '全局参数必须在 -m 前；模块参数由相应模块的 api.py 定义。\n'
             '数据集身份取 --input 文件名（不含扩展名）或上游 manifest；运行 ID 自动分配。\n'
             '示例：python main.py -m preprocess --help')
+
+
+def _format_elapsed(seconds: float) -> str:
+    """将单调计时器的秒数格式化为紧凑、可比较的运行时长。"""
+    whole_seconds = max(0, round(seconds))
+    hours, remainder = divmod(whole_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f'{hours:02d}:{minutes:02d}:{seconds:02d}'
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -83,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
         level = getattr(logging, global_values.log_level)
         with ProjectRunLock(project_root):
             allocation = allocate_run(project_root, dataset, module_name, global_values.seed)
-            workspace = ArtifactWorkspace(project_root / 'data' / module_name / dataset.dataset_id /
+            workspace = ArtifactWorkspace(project_root / 'data' / artifact_module_directory(module_name) / dataset.dataset_id /
                                           allocation.directory_name)
             try:
                 logger, log_path = setup_project_logging(console=global_values.console, project_root=project_root,
@@ -93,9 +109,11 @@ def main(argv: list[str] | None = None) -> int:
                 update_run_state(project_root, allocation, 'failure')
                 raise
             state = 'failure'
+            started_monotonic = time.monotonic()
             try:
                 logger.info('运行开始时间：%s', allocation.started_at.isoformat())
                 workspace.create()
+                logger.debug('已创建暂存产物目录：%s', workspace.staging_dir)
                 context = RunContext(project_root=project_root, module_name=module_name,
                                      dataset_id=dataset.dataset_id, dataset_name=dataset.dataset_name,
                                      run_id=allocation.run_id, run_timestamp=allocation.timestamp,
@@ -104,10 +122,14 @@ def main(argv: list[str] | None = None) -> int:
                 logger.info('启动模块：%s；dataset=%s；dataset_name=%s；run_id=%s；workers=%d；日志=%s',
                             module_name, context.dataset_id, context.dataset_name, context.run_id,
                             context.workers, log_path)
+                logger.debug('已解析全局参数：%s；模块参数：%s', vars(global_values), vars(module_values))
                 write_run_metadata(context, vars(global_values), vars(module_values))
                 result = api.run(context, module_values)
+                logger.debug('模块逻辑执行完成，待验收：summary=%s；dependencies=%s', result.summary, result.dependencies)
                 report = api.validate_outputs(context, module_values, result)
+                logger.debug('产物验收通过：%s', report.checks)
                 write_manifest(context, result, report)
+                logger.debug('已写入 manifest，准备发布暂存产物：%s', workspace.final_dir)
                 workspace.publish()
                 state = 'success'
                 logger.info('模块完成并发布：%s', context.final_dir)
@@ -122,7 +144,8 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     update_run_state(project_root, allocation, state)
                 finally:
-                    logger.info('运行结束时间：%s；state=%s', datetime.now().astimezone().isoformat(), state)
+                    logger.info('运行结束时间：%s；state=%s；运行时长=%s', datetime.now().astimezone().isoformat(), state,
+                                _format_elapsed(time.monotonic() - started_monotonic))
                     close_project_logging(logger)
                     logger = None
             return 0 if state == 'success' else 1
