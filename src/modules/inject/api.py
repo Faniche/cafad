@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, wait
+from src.utils.process_pool import InterruptibleProcessPoolExecutor as ProcessPoolExecutor
 from contextlib import nullcontext
 import json
 import logging
