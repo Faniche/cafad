@@ -37,17 +37,25 @@ class GroupTrainTests(unittest.TestCase):
         self.assertIs(selected[0], split)
         self.assertGreaterEqual(sum(len(item.effective_clusters) for item in selected), 2)
 
-    def test_sweep_distance_matches_scalar_definition(self) -> None:
+    def test_weighted_feature_distance_matches_manual_definition(self) -> None:
         import numpy as np
-        from scripts.group_distance_sweep import distance_matrix
-        from src.modules.group.distance import DistanceConfig, segment_distance
-        rng = np.random.default_rng(42)
-        anchors = [rng.random((size, 4)) for size in (1, 4, 8, 16)]
-        for mode in ('absolute', 'time_of_day'):
-            config = DistanceConfig(mode, 3600., 10000., .5, 'mean', 6371000.)
-            matrix = distance_matrix(anchors, config)
-            expected = np.array([[segment_distance(a, b, config) for b in anchors] for a in anchors])
-            np.testing.assert_allclose(matrix, expected, atol=1e-12)
+        from src.modules.group.features import weighted_distance_matrix
+        vectors = np.asarray([[0.0, 0.0], [3.0, 4.0], [6.0, 8.0]])
+        matrix = weighted_distance_matrix(vectors, 2)
+        np.testing.assert_allclose(matrix, [[0.0, 5.0, 10.0], [5.0, 0.0, 5.0], [10.0, 5.0, 0.0]], atol=1e-12)
+
+    def test_segment_center_time_uses_supplied_dataset_origin(self) -> None:
+        """被排除 NA 片段也不能悄然改变其余片段的全数据集时间原点。"""
+        from src.modules.group.features import build_segment_features
+        segments = pd.DataFrame({'segment_id': ['s0']})
+        values = pd.DataFrame({
+            'segment_id': ['s0', 's0'], 'time_ns': [1_000_000_000_000, 1_004_000_000_000],
+            'longitude_deg': [120.0, 120.1], 'latitude_deg': [30.0, 30.1],
+            'geometric_altitude_m': [100.0, 120.0], 'heading_deg': [359.0, 1.0], 'speed_mps': [40.0, 42.0],
+        })
+        features = build_segment_features(segments, values, time_origin_ns=998_000_000_000)
+        self.assertAlmostEqual(float(features.loc[0, 'center_time_s']), 4.0)
+        self.assertAlmostEqual(float(features.loc[0, 'duration_s']), 4.0)
 
     def test_spawn_pool_trains_independent_experts(self) -> None:
         from src.modules.train.parallel import train_pool
@@ -79,9 +87,11 @@ class GroupTrainTests(unittest.TestCase):
     def test_group_parser_has_visible_startup_defaults(self) -> None:
         """网页 schema 应从 argparse 取得可运行的 HDBSCAN 候选初始值。"""
         from src.modules.group.api import build_parser
-        values = build_parser().parse_args(['--input', 'segment.json', '--distance-config', 'distance.yaml'])
+        values = build_parser().parse_args(['--input', 'segment.json'])
         self.assertEqual(values.min_cluster_sizes, (4, 8, 12, 16, 24, 32, 48, 64))
         self.assertEqual(values.min_samples_values, (1, 2, 4, 8, 12, 16))
+        self.assertEqual(values.weight_center_time, 1.0)
+        self.assertEqual(values.weight_turn_rate, 1.0)
 
     def _run(self, base: Path, values: list[str]) -> None:
         with patch.object(PathUtils, 'get_project_root', return_value=base):
@@ -104,15 +114,17 @@ class GroupTrainTests(unittest.TestCase):
             injected = next((base / 'data' / '2_inject' / 'fixture').iterdir())
             self._run(base, ['-m', 'segment', '--input', str(injected / 'manifest.json'), '--window-seconds', '60', '--buckets', '2', '--chunk-rows', '10'])
             segmented = next((base / 'data' / '3_segment' / 'fixture').iterdir())
-            distance = base / 'distance.yaml'
-            distance.write_text('schema_version: 1\ntime_mode: absolute\nsigma_time_s: 1000000000\nsigma_space_m: 1000000000\nsigma_heading_rad: 3.141592653589793\naggregation: mean\nearth_radius_m: 6371000\n', encoding='utf-8')
-            self._run(base, ['-m', 'group', '--input', str(segmented / 'manifest.json'), '--distance-config', str(distance),
+            self._run(base, ['-m', 'group', '--input', str(segmented / 'manifest.json'),
                              '--min-cluster-sizes', '2', '--min-samples-values', '1', '--min-group-members', '2', '--max-group-fraction', '1'])
             grouped = next((base / 'data' / '4_group' / 'fixture').iterdir())
             groups = pd.read_csv(grouped / 'data' / 'groups.csv')
             assignments = pd.read_csv(grouped / 'data' / 'train_assignments.csv')
             selection = pd.read_csv(grouped / 'data' / 'hdbscan_selection.csv')
+            feature_scaler = json.loads((grouped / 'data' / 'feature_scaler.json').read_text(encoding='utf-8'))
             self.assertFalse(groups.empty); self.assertFalse(assignments.empty)
+            self.assertEqual(len(feature_scaler['feature_names']), 13)
+            self.assertEqual(len(feature_scaler['weights']), 13)
+            self.assertTrue((grouped / 'data' / 'segment_features.csv').is_file())
             self.assertEqual(int(selection['selected'].sum()), selection['phase'].nunique())
             self.assertTrue(assignments['segment_id'].is_unique)
             self.assertTrue(set(assignments['segment_label']).issubset({0, 1}))

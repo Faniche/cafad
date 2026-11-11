@@ -4,7 +4,9 @@ import json
 import logging
 import pandas as pd
 from src.app.artifacts import read_manifest
-from src.modules.group.distance import load_distance_config, sample_anchors, segment_distance
+from src.modules.group.api import _read_segment_store
+from src.modules.group.features import (FEATURE_NAMES, build_segment_features, centroids_by_group,
+                                        feature_scaler_from_dict, transform_features)
 from src.modules.train.api import _segment_manifest, _load_sequences, _devices
 from .scoring import score_pairs
 from .fusion import fuse_candidates, fallback_score
@@ -32,21 +34,21 @@ def score_partition(trained: Path, split: str, top_r: int, temperature: float, g
     if targets.empty:
         raise ValueError(f'{split} 分区没有片段')
     sequences, _ = _load_sequences(segmented)
-    config = load_distance_config(grouped.parent / 'distance_config.yaml')
-    resolved = json.loads((grouped.parent / 'resolved_config.json').read_text(encoding='utf-8'))
-    maximum = int(resolved['module']['anchors'])
     routing = pd.read_csv(grouped.parent / 'data/routing_segments.csv', keep_default_na=False)
     groups = pd.read_csv(grouped.parent / 'data/groups.csv', keep_default_na=False)
-    ids = set(targets['segment_id']) | set(routing['segment_id'])
-    anchors = {key: sample_anchors(sequences[key]['time_ns'].to_numpy(), sequences[key]['longitude_deg'].to_numpy(),
-                                  sequences[key]['latitude_deg'].to_numpy(), sequences[key]['heading_deg'].to_numpy(), maximum)
-               for key in ids}
-    members = routing.groupby('group_id')['segment_id'].apply(list).to_dict()
+    segment_rows, values = _read_segment_store(segmented)
+    scaler = feature_scaler_from_dict(json.loads((grouped.parent / 'data/feature_scaler.json').read_text(encoding='utf-8')))
+    features = build_segment_features(segment_rows, values, scaler.time_origin_ns)
+    vectors = transform_features(features, scaler)
+    vectors.insert(0, 'segment_id', features['segment_id'].astype(str))
+    vectors_by_segment = vectors.set_index('segment_id', verify_integrity=True)
+    centers = centroids_by_group(routing, vectors_by_segment)
     pairs = []
     for row in targets.itertuples(index=False):
         same = groups.loc[groups['phase'].eq(row.phase), 'group_id'].tolist()
         fallback = not same
-        distances = [(group, min(segment_distance(anchors[row.segment_id], anchors[key], config) for key in members[group]))
+        vector = vectors_by_segment.loc[row.segment_id, list(FEATURE_NAMES)].to_numpy(dtype=float)
+        distances = [(group, float(((vector - centers[group]) ** 2).sum() ** .5))
                      for group in (same or groups['group_id'].tolist())]
         selected = sorted(distances, key=lambda item: (item[1], item[0]))
         if not fallback:
