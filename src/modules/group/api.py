@@ -14,6 +14,7 @@ from sklearn.cluster import HDBSCAN
 from src.app.arguments import ProjectArgumentParser
 from src.app.artifacts import read_manifest, write_json
 from src.app.contracts import ModuleResult, RunContext, ValidationReport
+from src.app.tables import read_table, write_table
 
 from .features import (FEATURE_NAMES, FEATURE_WEIGHT_ARGUMENTS, build_segment_features, centroids_by_group,
                        fit_feature_scaler, transform_features, weighted_distance_matrix, weights_from_arguments)
@@ -78,12 +79,12 @@ def _read_segment_store(path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     required_points = {'segment_id', 'record_id', 'flight_id', 'time_ns'}
     required_observations = {'record_id', 'time_ns', 'longitude_deg', 'latitude_deg', 'geometric_altitude_m',
                              'barometric_altitude_m', 'heading_deg', 'speed_mps'}
-    segments = pd.read_csv(data_dir / 'segments.csv', usecols=list(required_segments),
-                           dtype={'segment_id': 'string', 'flight_id': 'string'})
-    points = pd.read_csv(data_dir / 'point_segment_map.csv', usecols=list(required_points),
-                         dtype={'segment_id': 'string', 'record_id': 'string', 'flight_id': 'string'})
-    observations = pd.read_csv(data_dir / 'input_observations.csv', usecols=list(required_observations),
-                               dtype={'record_id': 'string'})
+    segments = read_table(data_dir, 'segments', columns=required_segments,
+                          dtype={'segment_id': 'string', 'flight_id': 'string'})
+    points = read_table(data_dir, 'point_segment_map', columns=required_points,
+                        dtype={'segment_id': 'string', 'record_id': 'string', 'flight_id': 'string'})
+    observations = read_table(data_dir, 'input_observations', columns=required_observations,
+                              dtype={'record_id': 'string'})
     if not required_segments.issubset(segments.columns) or not required_points.issubset(points.columns) or not required_observations.issubset(observations.columns):
         raise ValueError('segment 产物缺少分组所需的片段、映射或观测字段')
     values = points.merge(observations[['record_id', 'longitude_deg', 'latitude_deg', 'geometric_altitude_m',
@@ -363,14 +364,14 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
                          len(assignments), len(validation_assignments), assignments['route_mode'].value_counts().to_dict())
     data_dir = context.staging_dir / 'data'
     data_dir.mkdir()
-    groups.to_csv(data_dir / 'groups.csv', index=False, encoding='utf-8')
-    core.to_csv(data_dir / 'routing_segments.csv', index=False, encoding='utf-8')
-    references.to_csv(data_dir / 'references.csv', index=False, encoding='utf-8')
-    assignments.to_csv(data_dir / 'train_assignments.csv', index=False, encoding='utf-8')
-    validation_assignments.to_csv(data_dir / 'validation_assignments.csv', index=False, encoding='utf-8')
-    exclusions.to_csv(data_dir / 'exclusions.csv', index=False, encoding='utf-8')
-    selection.to_csv(data_dir / 'hdbscan_selection.csv', index=False, encoding='utf-8')
-    features.to_csv(data_dir / 'segment_features.csv', index=False, encoding='utf-8')
+    write_table(groups, data_dir, 'groups')
+    write_table(core, data_dir, 'routing_segments')
+    write_table(references, data_dir, 'references')
+    write_table(assignments, data_dir, 'train_assignments')
+    write_table(validation_assignments, data_dir, 'validation_assignments')
+    write_table(exclusions, data_dir, 'exclusions')
+    write_table(selection, data_dir, 'hdbscan_selection')
+    write_table(features, data_dir, 'segment_features')
     write_json(data_dir / 'feature_scaler.json', scaler.as_dict())
     normal_coverage = len(normal_assignments) / len(normal)
     summary = {'input_manifest': str(input_manifest), 'clustering_algorithm': 'hdbscan',
@@ -391,13 +392,13 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
 def validate_outputs(context: RunContext, args: argparse.Namespace, result: ModuleResult) -> ValidationReport:
     """重新读取 S1，核验 HDBSCAN 参考、候选选择和训练唯一归属。"""
     data_dir = context.staging_dir / 'data'
-    groups = pd.read_csv(data_dir / 'groups.csv', dtype={'group_id': 'string'})
-    core = pd.read_csv(data_dir / 'routing_segments.csv', dtype={'group_id': 'string', 'segment_id': 'string', 'flight_id': 'string'})
-    references = pd.read_csv(data_dir / 'references.csv', dtype={'group_id': 'string', 'segment_id': 'string', 'flight_id': 'string'})
-    assignments = pd.read_csv(data_dir / 'train_assignments.csv', dtype={'segment_id': 'string', 'group_id': 'string'})
-    validation = pd.read_csv(data_dir / 'validation_assignments.csv', dtype={'segment_id': 'string', 'group_id': 'string'})
-    exclusions = pd.read_csv(data_dir / 'exclusions.csv', dtype={'segment_id': 'string'})
-    selection = pd.read_csv(data_dir / 'hdbscan_selection.csv')
+    groups = read_table(data_dir, 'groups', dtype={'group_id': 'string'})
+    core = read_table(data_dir, 'routing_segments', dtype={'group_id': 'string', 'segment_id': 'string', 'flight_id': 'string'})
+    references = read_table(data_dir, 'references', dtype={'group_id': 'string', 'segment_id': 'string', 'flight_id': 'string'})
+    assignments = read_table(data_dir, 'train_assignments', dtype={'segment_id': 'string', 'group_id': 'string'})
+    validation = read_table(data_dir, 'validation_assignments', dtype={'segment_id': 'string', 'group_id': 'string'})
+    exclusions = read_table(data_dir, 'exclusions', dtype={'segment_id': 'string'})
+    selection = read_table(data_dir, 'hdbscan_selection')
     if groups.empty or groups['group_id'].duplicated().any() or core.empty or references.empty:
         raise ValueError('有效组、路由片段或参考片段为空')
     minimum_effective_groups = int(result.summary['minimum_effective_groups'])

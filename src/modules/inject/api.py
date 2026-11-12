@@ -18,6 +18,7 @@ import pandas as pd
 from src.app.arguments import ProjectArgumentParser
 from src.app.artifacts import hash_file, read_manifest
 from src.app.contracts import ModuleResult, RunContext, ValidationReport
+from src.app.tables import read_table, write_table
 from src.data_processing.phase_pipeline import configure_worker_threads
 from src.modules.preprocess.canonical import CANONICAL_COLUMNS
 from src.modules.split.api import SPLIT_NAMES, TRAJECTORY_KINDS
@@ -66,9 +67,9 @@ def _read_inputs(context: RunContext, args: argparse.Namespace) -> tuple[Path, P
     if not isinstance(dependencies, list) or not any(
             isinstance(item, dict) and item.get('sha256') == expected_hash for item in dependencies):
         raise ValueError('split 清单未声明当前 preprocess manifest 作为已校验依赖')
-    observations = pd.read_csv(input_manifest.parent / 'data' / 'observations.csv',
-                               dtype={'record_id': 'string', 'flight_id': 'string', 'icao': 'string', 'call': 'string'})
-    splits = pd.read_csv(split_manifest.parent / 'data' / 'splits.csv', dtype={'flight_id': 'string'})
+    observations = read_table(input_manifest.parent / 'data', 'observations',
+                              dtype={'record_id': 'string', 'flight_id': 'string', 'icao': 'string', 'call': 'string'})
+    splits = read_table(split_manifest.parent / 'data', 'splits', dtype={'flight_id': 'string'})
     if tuple(observations.columns) != CANONICAL_COLUMNS or observations.empty:
         raise ValueError('preprocess 规范观测字段不符合约定或为空')
     required_split_columns = {'flight_id', 'split', 'injection_plan', 'injection_eligible', 'injection_skip_reason'}
@@ -102,11 +103,11 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
     )
     data_dir = context.staging_dir / 'data'
     data_dir.mkdir()
-    final_observations.to_csv(data_dir / 'observations.csv', index=False, encoding='utf-8')
-    label_table.to_csv(data_dir / 'record_labels.csv', index=False, encoding='utf-8')
-    event_table.to_csv(data_dir / 'injection_events.csv', index=False, encoding='utf-8')
-    impact_table.to_csv(data_dir / 'injection_impacts.csv', index=False, encoding='utf-8')
-    outcome_table.to_csv(data_dir / 'injection_outcomes.csv', index=False, encoding='utf-8')
+    write_table(final_observations, data_dir, 'observations')
+    write_table(label_table, data_dir, 'record_labels')
+    write_table(event_table, data_dir, 'injection_events')
+    write_table(impact_table, data_dir, 'injection_impacts')
+    write_table(outcome_table, data_dir, 'injection_outcomes')
     actual_flight_labels = final_observations.groupby('flight_id', sort=False)['injected_label'].max()
     outcome_counts = outcome_table['injection_outcome'].value_counts().to_dict()
     summary: dict[str, object] = {
@@ -364,12 +365,12 @@ def validate_outputs(context: RunContext, args: argparse.Namespace, result: Modu
     """重新读取产物，验证单副本、事件区间、标签、影响账本与跳过政策完全一致。"""
     _, _, _, original, splits, _ = _read_inputs(context, args)
     data_dir = context.staging_dir / 'data'
-    observations = pd.read_csv(data_dir / 'observations.csv', dtype={'record_id': 'string', 'flight_id': 'string', 'icao': 'string', 'call': 'string'})
-    labels = pd.read_csv(data_dir / 'record_labels.csv', dtype={'record_id': 'string', 'flight_id': 'string'})
-    events = pd.read_csv(data_dir / 'injection_events.csv', dtype={'flight_id': 'string', 'start_record_id': 'string',
-                                                                    'end_record_id_exclusive': 'string'})
-    impacts = pd.read_csv(data_dir / 'injection_impacts.csv', dtype={'flight_id': 'string', 'event_id': 'string'})
-    outcomes = pd.read_csv(data_dir / 'injection_outcomes.csv', dtype={'flight_id': 'string'})
+    observations = read_table(data_dir, 'observations', dtype={'record_id': 'string', 'flight_id': 'string', 'icao': 'string', 'call': 'string'})
+    labels = read_table(data_dir, 'record_labels', dtype={'record_id': 'string', 'flight_id': 'string'})
+    events = read_table(data_dir, 'injection_events', dtype={'flight_id': 'string', 'start_record_id': 'string',
+                                                              'end_record_id_exclusive': 'string'})
+    impacts = read_table(data_dir, 'injection_impacts', dtype={'flight_id': 'string', 'event_id': 'string'})
+    outcomes = read_table(data_dir, 'injection_outcomes', dtype={'flight_id': 'string'})
     if tuple(observations.columns) != OBSERVATION_COLUMNS:
         raise ValueError('inject 最终观测字段或顺序不符合约定')
     if tuple(labels.columns) != LABEL_COLUMNS or tuple(events.columns) != EVENT_COLUMNS or tuple(impacts.columns) != IMPACT_COLUMNS:

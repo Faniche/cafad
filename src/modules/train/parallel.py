@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import pandas as pd
 import torch
+from src.app.tables import read_table
 from .progress import ProgressListener
 
 
@@ -42,9 +43,9 @@ def initialize_worker(devices: object, logs: object, group_manifest: Path, segme
     logger = logging.getLogger('cafad.train.worker')
     logger.handlers = [QueueHandler(logs)]; logger.setLevel(level); logger.propagate = False
     data = group_manifest.parent / 'data'
-    assignments = pd.read_csv(data / 'train_assignments.csv', keep_default_na=False)
-    validation = pd.read_csv(data / 'validation_assignments.csv', keep_default_na=False)
-    references = pd.read_csv(data / 'references.csv', keep_default_na=False)
+    assignments = read_table(data, 'train_assignments', keep_default_na=False)
+    validation = read_table(data, 'validation_assignments', keep_default_na=False)
+    references = read_table(data, 'references', keep_default_na=False)
     sequences, _ = _load_sequences(segment_manifest)
     needed = set(assignments.segment_id) | set(validation.segment_id) | set(references.segment_id)
     sequences = {key: value for key, value in sequences.items() if key in needed}

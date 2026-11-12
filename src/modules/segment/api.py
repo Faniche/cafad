@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import shutil
 
 import numpy as np
 import pandas as pd
@@ -11,6 +12,7 @@ import pandas as pd
 from src.app.arguments import ProjectArgumentParser
 from src.app.artifacts import read_manifest
 from src.app.contracts import ModuleResult, RunContext, ValidationReport
+from src.app.tables import export_csv, read_table, write_table
 from src.data_processing.phase_pipeline import PipelineConfig, process_cleaned_csv
 
 
@@ -54,7 +56,7 @@ def _upstream_gap(manifest_path: Path) -> float:
 
 def _write_segment_tables(data_dir: Path, phase_dir: Path) -> dict[str, int]:
     """回接可识别记录，并为按航班排除的数值失败轨迹保存稳定 ID 报告。"""
-    observations = pd.read_csv(data_dir / 'input_observations.csv', dtype={'record_id': 'string', 'flight_id': 'string'})
+    observations = read_table(data_dir, 'input_observations', dtype={'record_id': 'string', 'flight_id': 'string'})
     points = pd.read_csv(phase_dir / 'points.csv', dtype={'flight_id': 'string', 'segment_id': 'string'})
     unrecognized = pd.read_csv(phase_dir / 'unrecognized_flights.csv', dtype={'flight_id': 'string'})
     unrecognized_points = pd.read_csv(phase_dir / 'unrecognized_points.csv', dtype={'flight_id': 'string'})
@@ -105,14 +107,13 @@ def _write_segment_tables(data_dir: Path, phase_dir: Path) -> dict[str, int]:
         segments = segments.merge(segment_splits, on='segment_id', how='left', validate='one_to_one')
     if segments['segment_label'].isna().any() or not set(segments['segment_id']).issubset(set(mapping['segment_id'])):
         raise RuntimeError('片段标签或映射不完整')
-    mapping.to_csv(data_dir / 'point_segment_map.csv', index=False, encoding='utf-8')
-    segments.to_csv(data_dir / 'segments.csv', index=False, encoding='utf-8')
-    unrecognized.to_csv(data_dir / 'unrecognized_trajectories.csv', index=False, encoding='utf-8')
+    write_table(mapping, data_dir, 'point_segment_map')
+    write_table(segments, data_dir, 'segments')
+    write_table(unrecognized, data_dir, 'unrecognized_trajectories')
     excluded_output_columns = ['record_id', 'flight_id', 'time_ns', 'reason']
     if has_split:
         excluded_output_columns.append('split')
-    excluded[excluded_output_columns].to_csv(
-        data_dir / 'unrecognized_point_map.csv', index=False, encoding='utf-8')
+    write_table(excluded[excluded_output_columns], data_dir, 'unrecognized_point_map')
     return {'points': int(len(mapping)), 'segments': int(len(segments)),
             'anomalous_segments': int(segments['segment_label'].sum()),
             'unrecognized_flights': int(len(unrecognized)), 'unrecognized_points': int(len(excluded))}
@@ -126,14 +127,16 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
         raise ValueError('segment 只能读取 preprocess 或 inject 的最终观测')
     if manifest.get('dataset_id') != context.dataset_id:
         raise ValueError('上游数据集身份与本次从 --input 自动识别的身份不一致')
-    source = input_manifest.parent / 'data' / 'observations.csv'
+    source_dir = input_manifest.parent / 'data'
+    source = source_dir / 'observations.parquet'
     if not source.is_file():
         raise FileNotFoundError(f'上游缺少规范观测：{source}')
     gap = args.flight_gap_seconds if args.flight_gap_seconds is not None else _upstream_gap(input_manifest)
     data_dir = context.staging_dir / 'data'
     data_dir.mkdir()
-    staged_source = data_dir / 'input_observations.csv'
-    staged_source.write_bytes(source.read_bytes())
+    shutil.copy2(source, data_dir / 'input_observations.parquet')
+    staged_source = data_dir / '.input_observations.runtime.csv'
+    export_csv(data_dir, 'input_observations', staged_source)
     config = PipelineConfig(altitude_unit='m', speed_unit='m/s', workers=context.workers,
                             chunk_rows=args.chunk_rows, buckets=args.buckets, window_seconds=args.window_seconds,
                             flight_gap_seconds=gap, timestamp_unit='ns')
@@ -143,8 +146,11 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
                                   column_overrides={'icao': 'icao', 'call': 'call', 'time': 'time_ns',
                                                     'altitude': 'geometric_altitude_m', 'speed': 'speed_mps',
                                                     'longitude': 'longitude_deg', 'latitude': 'latitude_deg'},
+                                  progress_database=data_dir / 'segment_progress.sqlite',
                                   logger=context.logger)
     linked = _write_segment_tables(data_dir, data_dir / 'phase')
+    staged_source.unlink()
+    shutil.rmtree(data_dir / 'phase')
     combined: dict[str, object] = {'input_manifest': str(input_manifest), 'flight_gap_seconds': gap,
                                    'window_seconds': args.window_seconds, **summary, **linked}
     context.logger.info('阶段片段完成：可识别点=%d，片段=%d，异常片段=%d，不可识别航班=%d／点=%d',
@@ -156,11 +162,11 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
 def validate_outputs(context: RunContext, args: argparse.Namespace, result: ModuleResult) -> ValidationReport:
     """检查记录守恒、唯一映射、片段标签 OR 及阶段输出完整性。"""
     data_dir = context.staging_dir / 'data'
-    observations = pd.read_csv(data_dir / 'input_observations.csv', dtype={'record_id': 'string', 'flight_id': 'string'})
-    mapping = pd.read_csv(data_dir / 'point_segment_map.csv', dtype={'record_id': 'string', 'flight_id': 'string', 'segment_id': 'string'})
-    segments = pd.read_csv(data_dir / 'segments.csv', dtype={'segment_id': 'string', 'flight_id': 'string'})
-    excluded = pd.read_csv(data_dir / 'unrecognized_point_map.csv', dtype={'record_id': 'string', 'flight_id': 'string'})
-    unrecognized = pd.read_csv(data_dir / 'unrecognized_trajectories.csv', dtype={'flight_id': 'string'})
+    observations = read_table(data_dir, 'input_observations', dtype={'record_id': 'string', 'flight_id': 'string'})
+    mapping = read_table(data_dir, 'point_segment_map', dtype={'record_id': 'string', 'flight_id': 'string', 'segment_id': 'string'})
+    segments = read_table(data_dir, 'segments', dtype={'segment_id': 'string', 'flight_id': 'string'})
+    excluded = read_table(data_dir, 'unrecognized_point_map', dtype={'record_id': 'string', 'flight_id': 'string'})
+    unrecognized = read_table(data_dir, 'unrecognized_trajectories', dtype={'flight_id': 'string'})
     if (mapping['record_id'].duplicated().any() or excluded['record_id'].duplicated().any()
             or len(mapping) + len(excluded) != len(observations)
             or set(mapping['record_id']) & set(excluded['record_id'])):

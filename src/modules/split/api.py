@@ -10,6 +10,7 @@ import pandas as pd
 from src.app.arguments import ProjectArgumentParser
 from src.app.artifacts import read_manifest
 from src.app.contracts import ModuleResult, RunContext, ValidationReport
+from src.app.tables import read_table, write_table
 from src.utils.env import Env
 
 
@@ -88,7 +89,7 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
     if manifest.get('dataset_id') != context.dataset_id:
         raise ValueError('上游数据集身份与本次从 --input 自动识别的身份不一致')
     source_dir = input_manifest.parent / 'data'
-    flights = pd.read_csv(source_dir / 'flights.csv', dtype={'flight_id': 'string', 'icao': 'string', 'call': 'string'})
+    flights = read_table(source_dir, 'flights', dtype={'flight_id': 'string', 'icao': 'string', 'call': 'string'})
     if flights.empty or flights['flight_id'].duplicated().any():
         raise ValueError('上游航班表为空或 flight_id 不唯一')
     if (np.asarray(args.ratios, dtype=np.float64) <= 0).any():
@@ -127,7 +128,7 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
     result = result.merge(flights[['flight_id', 'icao', 'call']], on='flight_id', validate='one_to_one')
     output = context.staging_dir / 'data'
     output.mkdir()
-    result.to_csv(output / 'splits.csv', index=False, encoding='utf-8')
+    write_table(result, output, 'splits')
     requested_plan_summary = {
         split_name: {kind: int(requested_plans[split_index, kind_index]) for kind_index, kind in enumerate(TRAJECTORY_KINDS)}
         for split_index, split_name in enumerate(SPLIT_NAMES)
@@ -153,7 +154,7 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
 
 def validate_outputs(context: RunContext, args: argparse.Namespace, result: ModuleResult) -> ValidationReport:
     """检查分区表对所有来源航班覆盖一次且标签合法。"""
-    table = pd.read_csv(context.staging_dir / 'data' / 'splits.csv', dtype={'flight_id': 'string'})
+    table = read_table(context.staging_dir / 'data', 'splits', dtype={'flight_id': 'string'})
     if table.empty or table['flight_id'].duplicated().any():
         raise ValueError('split 表为空或 flight_id 重复')
     allowed = set(SPLIT_NAMES)

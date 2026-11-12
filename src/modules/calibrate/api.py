@@ -7,6 +7,7 @@ import pandas as pd
 from src.app.arguments import ProjectArgumentParser
 from src.app.artifacts import write_json
 from src.app.contracts import RunContext, ModuleResult, ValidationReport
+from src.app.tables import read_table, write_table
 from src.modules.detect.inference import score_partition
 from .threshold import select_segment_threshold
 
@@ -27,13 +28,13 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
     trained = (context.project_root / args.input).resolve()
     scores, pairs, segmented = score_partition(trained, 'val', args.top_r, args.temperature, args.gpus,
                                               context.logger, context.workers, args.score_task_size)
-    labels = pd.read_csv(segmented.parent / 'data/segments.csv', usecols=['segment_id', 'segment_label'])
+    labels = read_table(segmented.parent / 'data', 'segments', columns=['segment_id', 'segment_label'])
     scores = scores.merge(labels, on='segment_id', validate='one_to_one')
     threshold, scan = select_segment_threshold(scores['score'].to_numpy(), scores['segment_label'].to_numpy())
     data = context.staging_dir / 'data'; data.mkdir()
-    scores.to_csv(data / 'val_scores.csv', index=False)
-    pairs.to_csv(data / 'val_expert_scores.csv', index=False)
-    scan.to_csv(data / 'threshold_scan.csv', index=False)
+    write_table(scores, data, 'val_scores')
+    write_table(pairs, data, 'val_expert_scores')
+    write_table(scan, data, 'threshold_scan')
     write_json(context.staging_dir / 'system_bundle.json', {'schema_version': 1, 'train_manifest': str(trained),
                'threshold': threshold, 'top_r': args.top_r, 'temperature': args.temperature,
                'fusion': 'distance-weighted', 'fallback': 'majority-interval', 'comparison': '>='})
@@ -43,7 +44,7 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
 
 
 def validate_outputs(context: RunContext, args: argparse.Namespace, result: ModuleResult) -> ValidationReport:
-    scores = pd.read_csv(context.staging_dir / 'data/val_scores.csv')
+    scores = read_table(context.staging_dir / 'data', 'val_scores')
     threshold, _ = select_segment_threshold(scores['score'].to_numpy(), scores['segment_label'].to_numpy())
     bundle = json.loads((context.staging_dir / 'system_bundle.json').read_text(encoding='utf-8'))
     if scores['segment_id'].duplicated().any() or not scores['split'].eq('val').all() or not np.isclose(threshold, bundle['threshold']):

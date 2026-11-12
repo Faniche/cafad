@@ -14,6 +14,7 @@ from torch import nn
 from src.app.arguments import ProjectArgumentParser
 from src.app.artifacts import read_manifest, write_json
 from src.app.contracts import ModuleResult, RunContext, ValidationReport
+from src.app.tables import read_table, write_table
 from src.utils.precision import precision_context, validate_precision
 
 from .model import ExpertModel
@@ -73,16 +74,16 @@ def _load_sequences(segment_manifest: Path) -> tuple[dict[str, pd.DataFrame], pd
     """由 S0 读取变长最终片段；模型从不读取干净副本或注入事件位置。"""
     data = segment_manifest.parent / 'data'
     columns = ['record_id', 'time_ns', 'longitude_deg', 'latitude_deg', 'geometric_altitude_m', 'barometric_altitude_m', 'heading_deg', 'speed_mps']
-    points = pd.read_csv(data / 'point_segment_map.csv', usecols=['segment_id', 'record_id'],
-                         dtype={'segment_id': 'string', 'record_id': 'string'})
-    observations = pd.read_csv(data / 'input_observations.csv', usecols=columns, dtype={'record_id': 'string'})
+    points = read_table(data, 'point_segment_map', columns=['segment_id', 'record_id'],
+                        dtype={'segment_id': 'string', 'record_id': 'string'})
+    observations = read_table(data, 'input_observations', columns=columns, dtype={'record_id': 'string'})
     values = points[['segment_id', 'record_id']].merge(observations[columns], on='record_id', how='left', validate='one_to_one')
     if values.isna().any().any() or values['segment_id'].isna().any():
         raise ValueError('训练片段无法与最终观测完整对齐')
     sequences = {str(segment_id): frame.sort_values('time_ns', kind='stable').reset_index(drop=True)
                  for segment_id, frame in values.groupby('segment_id', sort=False, observed=True)}
-    metadata = pd.read_csv(data / 'segments.csv', usecols=['segment_id', 'flight_id'],
-                           dtype={'segment_id': 'string', 'flight_id': 'string'})
+    metadata = read_table(data, 'segments', columns=['segment_id', 'flight_id'],
+                          dtype={'segment_id': 'string', 'flight_id': 'string'})
     return sequences, metadata
 
 
@@ -242,7 +243,7 @@ def _train_expert(group_id: str, expert_index: int, assignments: pd.DataFrame, v
     torch.save({'state_dict': best_state, 'architecture': _architecture(args), 'precision': args.precision}, output / 'best.pt')
     np.save(output / 'memory.npy', final_memory)
     write_json(output / 'stats.json', stats); write_json(output / 'reference_ids.json', {'reference_ids': final_ids})
-    pd.DataFrame(history).to_csv(output / 'history.csv', index=False, encoding='utf-8')
+    write_table(pd.DataFrame(history), output, 'history')
     progress.update(force=True, state='completed', early_stopped=len(history) < args.epochs)
     logger.debug('专家 %s 保存阶段耗时；%s', group_id, format_timing(saving_timing.summary_seconds()))
     logger.info('专家 %s 完成：device=%s；targets=%d；validation=%d；checkpoint_selection=%s；best_loss=%.6f',
@@ -294,10 +295,10 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
     read_manifest(group_manifest, expected_module='group')
     segment_manifest = _segment_manifest(group_manifest)
     group_data = group_manifest.parent / 'data'
-    groups = pd.read_csv(group_data / 'groups.csv', dtype={'group_id': 'string'})
-    references = pd.read_csv(group_data / 'references.csv', dtype={'group_id': 'string', 'segment_id': 'string', 'flight_id': 'string'})
-    assignments = pd.read_csv(group_data / 'train_assignments.csv', dtype={'group_id': 'string', 'segment_id': 'string', 'flight_id': 'string'})
-    validation = pd.read_csv(group_data / 'validation_assignments.csv', dtype={'group_id': 'string', 'segment_id': 'string', 'flight_id': 'string'})
+    groups = read_table(group_data, 'groups', dtype={'group_id': 'string'})
+    references = read_table(group_data, 'references', dtype={'group_id': 'string', 'segment_id': 'string', 'flight_id': 'string'})
+    assignments = read_table(group_data, 'train_assignments', dtype={'group_id': 'string', 'segment_id': 'string', 'flight_id': 'string'})
+    validation = read_table(group_data, 'validation_assignments', dtype={'group_id': 'string', 'segment_id': 'string', 'flight_id': 'string'})
     devices = _devices(args.gpus)
     for device in devices:
         validate_precision(args.precision, device)
@@ -313,7 +314,7 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
     summaries = train_pool([(str(row.group_id), int(row.expert_id)) for row in rows], devices, group_manifest,
                            segment_manifest, args, context.seed, model_dir, context.logger, context.workers)
     summaries.sort(key=lambda item: int(item['expert_id']))
-    pd.DataFrame(summaries).to_csv(context.staging_dir / 'expert_summary.csv', index=False, encoding='utf-8')
+    write_table(pd.DataFrame(summaries), context.staging_dir, 'expert_summary')
     return ModuleResult(summary={'input_manifest': str(group_manifest), 'segment_manifest': str(segment_manifest),
                                  'experts': len(summaries), 'targets': int(len(assignments)), 'validation_targets': int(len(validation)),
                                  'ablation': args.ablation, 'precision': args.precision,
@@ -323,12 +324,12 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
 
 def validate_outputs(context: RunContext, args: argparse.Namespace, result: ModuleResult) -> ValidationReport:
     """检查每个有效组都有可重新加载的权重、统计量、参考 ID 和固定记忆。"""
-    summary = pd.read_csv(context.staging_dir / 'expert_summary.csv', dtype={'group_id': 'string'})
+    summary = read_table(context.staging_dir, 'expert_summary', dtype={'group_id': 'string'})
     if summary.empty or summary['group_id'].duplicated().any():
         raise ValueError('训练没有为每个有效组产出唯一专家摘要')
     for group_id in summary['group_id'].astype(str):
         directory = context.staging_dir / 'models' / group_id
-        required = [directory / name for name in ('best.pt', 'memory.npy', 'stats.json', 'reference_ids.json', 'history.csv')]
+        required = [directory / name for name in ('best.pt', 'memory.npy', 'stats.json', 'reference_ids.json', 'history.parquet')]
         if not all(item.is_file() for item in required):
             raise ValueError(f'专家 {group_id} 缺少权重、记忆或配置')
         memory = np.load(directory / 'memory.npy', allow_pickle=False)

@@ -7,6 +7,7 @@ import pandas as pd
 from src.app.arguments import ProjectArgumentParser
 from src.app.artifacts import read_manifest
 from src.app.contracts import RunContext, ModuleResult, ValidationReport
+from src.app.tables import read_table, write_table
 from .inference import score_partition, upstream
 from .fusion import make_predictions
 
@@ -31,9 +32,9 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
                                      context.logger, context.workers, args.score_task_size)
     segments, flights = make_predictions(scores, bundle['threshold'])
     data = context.staging_dir / 'data'; data.mkdir()
-    pairs.to_csv(data / 'expert_scores.csv', index=False)
-    segments.to_csv(data / 'segment_predictions.csv', index=False)
-    flights.to_csv(data / 'flight_predictions.csv', index=False)
+    write_table(pairs, data, 'expert_scores')
+    write_table(segments, data, 'segment_predictions')
+    write_table(flights, data, 'flight_predictions')
     context.logger.info('检测完成：segments=%d；flights=%d；异常片段=%d；异常航班=%d',
                         len(segments), len(flights), segments['prediction'].sum(), flights['prediction'].sum())
     return ModuleResult(summary={'segments': len(segments), 'flights': len(flights), 'threshold': bundle['threshold'],
@@ -41,8 +42,8 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
 
 
 def validate_outputs(context: RunContext, args: argparse.Namespace, result: ModuleResult) -> ValidationReport:
-    segments = pd.read_csv(context.staging_dir / 'data/segment_predictions.csv')
-    flights = pd.read_csv(context.staging_dir / 'data/flight_predictions.csv', dtype={'flight_id': str})
+    segments = read_table(context.staging_dir / 'data', 'segment_predictions')
+    flights = read_table(context.staging_dir / 'data', 'flight_predictions', dtype={'flight_id': str})
     if segments.empty or segments['segment_id'].duplicated().any() or not np.isfinite(segments['score']).all():
         raise ValueError('检测片段为空、重复或评分非有限')
     predicted, expected = make_predictions(segments, result.summary['threshold'])

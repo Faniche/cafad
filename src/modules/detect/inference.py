@@ -4,6 +4,7 @@ import json
 import logging
 import pandas as pd
 from src.app.artifacts import read_manifest
+from src.app.tables import read_table
 from src.modules.group.api import _read_segment_store
 from src.modules.group.features import (FEATURE_NAMES, build_segment_features, centroids_by_group,
                                         feature_scaler_from_dict, transform_features)
@@ -28,14 +29,14 @@ def score_partition(trained: Path, split: str, top_r: int, temperature: float, g
     read_manifest(trained, expected_module='train')
     grouped = upstream(trained, 'group')
     segmented = _segment_manifest(grouped)
-    metadata = pd.read_csv(segmented.parent / 'data/segments.csv',
-                           usecols=['segment_id', 'flight_id', 'phase', 'split'], keep_default_na=False)
+    metadata = read_table(segmented.parent / 'data', 'segments',
+                          columns=['segment_id', 'flight_id', 'phase', 'split'], keep_default_na=False)
     targets = metadata.loc[metadata['split'].eq(split)].copy()
     if targets.empty:
         raise ValueError(f'{split} 分区没有片段')
     sequences, _ = _load_sequences(segmented)
-    routing = pd.read_csv(grouped.parent / 'data/routing_segments.csv', keep_default_na=False)
-    groups = pd.read_csv(grouped.parent / 'data/groups.csv', keep_default_na=False)
+    routing = read_table(grouped.parent / 'data', 'routing_segments', keep_default_na=False)
+    groups = read_table(grouped.parent / 'data', 'groups', keep_default_na=False)
     segment_rows, values = _read_segment_store(segmented)
     scaler = feature_scaler_from_dict(json.loads((grouped.parent / 'data/feature_scaler.json').read_text(encoding='utf-8')))
     features = build_segment_features(segment_rows, values, scaler.time_origin_ns)

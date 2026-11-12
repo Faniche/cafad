@@ -9,6 +9,7 @@ import pandas as pd
 
 from src.app.arguments import ProjectArgumentParser
 from src.app.contracts import ModuleResult, RunContext, ValidationReport
+from src.app.tables import read_table
 from .canonical import CANONICAL_COLUMNS, preprocess_adsb_csv
 
 
@@ -55,8 +56,8 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
 def validate_outputs(context: RunContext, args: argparse.Namespace, result: ModuleResult) -> ValidationReport:
     """重新读取 CSV，检查字段、身份唯一性、时间去重和航班外键。"""
     data = context.staging_dir / 'data'
-    observations = pd.read_csv(data / 'observations.csv', dtype={'record_id': 'string', 'flight_id': 'string', 'icao': 'string', 'call': 'string'})
-    flights = pd.read_csv(data / 'flights.csv', dtype={'flight_id': 'string', 'icao': 'string', 'call': 'string'})
+    observations = read_table(data, 'observations', dtype={'record_id': 'string', 'flight_id': 'string', 'icao': 'string', 'call': 'string'})
+    flights = read_table(data, 'flights', dtype={'flight_id': 'string', 'icao': 'string', 'call': 'string'})
     if tuple(observations.columns) != CANONICAL_COLUMNS:
         raise ValueError('规范观测字段或顺序不符合约定')
     if observations.empty or observations['record_id'].duplicated().any():
@@ -67,7 +68,7 @@ def validate_outputs(context: RunContext, args: argparse.Namespace, result: Modu
         raise ValueError('观测与来源航班表的关系不完整')
     if observations['injected_label'].ne(0).any():
         raise ValueError('preprocess 产物不应含注入标签')
-    rejections = pd.read_csv(data / 'rejections.csv')
+    rejections = read_table(data, 'rejections')
     if len(observations) + len(rejections) != int(result.summary['input_rows']):
         raise ValueError('清洗前后记录数不守恒')
     return ValidationReport(checks={'observations': int(len(observations)), 'flights': int(len(flights)),

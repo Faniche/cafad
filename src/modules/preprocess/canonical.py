@@ -9,6 +9,8 @@ from typing import Mapping
 import numpy as np
 import pandas as pd
 
+from src.app.tables import write_table
+
 
 CANONICAL_COLUMNS = (
     'record_id', 'source_row_index', 'flight_id', 'icao', 'call', 'time_ns',
@@ -170,8 +172,8 @@ def preprocess_adsb_csv(source: Path, destination: Path, *, column_overrides: Ma
     if observations['record_id'].duplicated().any() or observations['flight_id'].isna().any():
         raise RuntimeError('稳定记录或航班身份生成失败')
     destination.mkdir(parents=True, exist_ok=False)
-    observations.to_csv(destination / 'observations.csv', index=False, encoding='utf-8')
-    flights.to_csv(destination / 'flights.csv', index=False, encoding='utf-8')
+    write_table(observations, destination, 'observations')
+    write_table(flights, destination, 'flights')
     invalid_rejections = pd.DataFrame({
         'source_row_index': np.arange(len(reason), dtype=np.int64)[reason != ''],
         'reason': reason[reason != ''],
@@ -181,7 +183,7 @@ def preprocess_adsb_csv(source: Path, destination: Path, *, column_overrides: Ma
         raise RuntimeError('同一原始记录不能被写入多次删除清单')
     if len(observations) + len(rejection_table) != len(raw):
         raise RuntimeError('清洗前后记录数不守恒')
-    rejection_table.to_csv(destination / 'rejections.csv', index=False, encoding='utf-8')
+    write_table(rejection_table, destination, 'rejections')
     summary: dict[str, object] = {
         'input': str(source.resolve()), 'input_sha256': source_hash, 'input_rows': int(len(raw)),
         'kept_rows': int(len(observations)), 'rejected_rows': int(len(rejection_table)),
