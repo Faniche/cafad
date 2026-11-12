@@ -8,7 +8,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.web_console.local_plot import _finalize_paths, load_group_index, render_plot, segment_choices
+from src.web_console.local_plot import (MAX_TOTAL_DISPLAY_POINTS, _display_paths, _finalize_paths, load_group_index,
+                                        render_plot, segment_choices)
 
 
 class LocalPlotTests(unittest.TestCase):
@@ -47,3 +48,10 @@ class LocalPlotTests(unittest.TestCase):
         result = _finalize_paths(paths, workers=2)
         self.assertEqual(len(result), 32)
         self.assertTrue((result['segment-0'][:, 0] == [1.0, 2.0]).all())
+
+    def test_global_preview_respects_total_point_budget(self) -> None:
+        """数千个阶段片段总览不能把每段最大点数相加成巨型 SVG。"""
+        paths = {f'segment-{index}': np.zeros((300, 4)) for index in range(4_529)}
+        displayed = _display_paths(paths)
+        self.assertEqual(set(displayed), set(paths))
+        self.assertLessEqual(sum(len(values) for values in displayed.values()), MAX_TOTAL_DISPLAY_POINTS)

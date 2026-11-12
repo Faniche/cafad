@@ -17,9 +17,11 @@ from src.utils.process_pool import InterruptibleProcessPoolExecutor
 
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
+from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
 
 MAX_POINTS_PER_PATH = 300
+MAX_TOTAL_DISPLAY_POINTS = 50_000
 PARALLEL_FINALIZE_MINIMUM_PATHS = 32
 PARALLEL_FINALIZE_MAX_POINTS = 1_000_000
 OBSERVATION_COLUMNS = ('record_id', 'flight_id', 'time_ns', 'longitude_deg', 'latitude_deg', 'geometric_altitude_m')
@@ -114,10 +116,13 @@ def render_plot(dataset_path: Path, index: GroupIndex, group_id: str | None, seg
     if not paths:
         raise ValueError('所选成员没有与数据集中的有效经纬高记录对齐')
     color_by_segment = index.members.set_index('segment_id')['group_id'].astype(str).to_dict()
-    image = _draw(paths, color_by_segment, whole_flight)
+    displayed = _display_paths(paths)
+    image = _draw(displayed, color_by_segment, whole_flight)
     return image, {
         'group_count': int(selected['group_id'].nunique()), 'segment_count': int(selected['segment_id'].nunique()),
         'flight_count': int(selected['flight_id'].nunique()), 'path_count': len(paths),
+        'display_points': int(sum(len(values) for values in displayed.values())),
+        'display_point_budget': MAX_TOTAL_DISPLAY_POINTS,
         'mode': '整条轨迹' if whole_flight else '阶段片段', 'routing_file': str(index.routing_path),
         'configured_workers': workers,
     }
@@ -193,16 +198,31 @@ def _downsample(values: np.ndarray) -> np.ndarray:
     return values[np.linspace(0, len(values) - 1, MAX_POINTS_PER_PATH, dtype=int)]
 
 
+def _display_paths(paths: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """按总展示点预算二次采样，大量片段的总览不生成巨型 SVG。"""
+    per_path = max(2, min(MAX_POINTS_PER_PATH, MAX_TOTAL_DISPLAY_POINTS // len(paths)))
+    return {
+        path_id: values if len(values) <= per_path else values[np.linspace(0, len(values) - 1, per_path, dtype=int)]
+        for path_id, values in paths.items()
+    }
+
+
 def _draw(paths: dict[str, np.ndarray], color_by_segment: dict[str, str], whole_flight: bool) -> bytes:
-    """绘制经度、纬度、几何高度三轴折线，并返回 SVG 字节。"""
+    """按组批量绘制经度、纬度、几何高度三轴折线，并返回 SVG 字节。"""
     figure = plt.figure(figsize=(10, 7), constrained_layout=True)
     axis = figure.add_subplot(projection='3d')
     groups = sorted(set(color_by_segment.values()))
     palette = {group: plt.get_cmap('tab20')(number % 20) for number, group in enumerate(groups)}
+    grouped_paths: dict[str, list[np.ndarray]] = defaultdict(list)
     for number, (path_id, values) in enumerate(paths.items()):
         group = color_by_segment.get(path_id)
+        key = group if group is not None else f'unassigned-{number % 20}'
+        grouped_paths[key].append(values[:, 1:4])
+    for number, (group, segments) in enumerate(grouped_paths.items()):
         color = palette.get(group, plt.get_cmap('tab20')(number % 20))
-        axis.plot(values[:, 1], values[:, 2], values[:, 3], color=color, linewidth=0.7, alpha=0.75)
+        axis.add_collection3d(Line3DCollection(segments, colors=[color], linewidths=0.7, alpha=0.75))
+    coordinates = np.concatenate(list(paths.values()))[:, 1:4]
+    axis.auto_scale_xyz(coordinates[:, 0], coordinates[:, 1], coordinates[:, 2])
     axis.set_xlabel('Longitude (deg)')
     axis.set_ylabel('Latitude (deg)')
     axis.set_zlabel('Geometric altitude (m)')
