@@ -38,10 +38,9 @@ def build_parser() -> argparse.ArgumentParser:
     """定义单副本合成异常注入所需的持久化输入。"""
     parser = ProjectArgumentParser(
         prog='main.py -m inject',
-        description='按 split 计划和显式协议在整条合格航班内生成唯一最终观测版本。',
+        description='在冻结干净分组后，按 split 计划和显式协议生成唯一最终观测版本。',
     )
-    parser.add_argument('--input', required=True, type=Path, help='preprocess 模块已发布的 manifest.json')
-    parser.add_argument('--split-manifest', required=True, type=Path, help='对应 preprocess 的 split 模块 manifest.json')
+    parser.add_argument('--input', required=True, type=Path, help='group 模块已发布的 manifest.json')
     parser.add_argument('--protocol', required=True, type=Path,
                         help='定义事件类型、概率、长度、强度与平滑的 schema_version=2 JSON/YAML 注入配置')
     return parser
@@ -51,23 +50,30 @@ def _project_path(context: RunContext, value: Path) -> Path:
     return value if value.is_absolute() else context.project_root / value
 
 
-def _read_inputs(context: RunContext, args: argparse.Namespace) -> tuple[Path, Path, Path, pd.DataFrame, pd.DataFrame, dict[str, object]]:
-    """读取并交叉核验 preprocess、split 与显式注入协议。"""
-    input_manifest = _project_path(context, args.input).resolve()
-    split_manifest = _project_path(context, args.split_manifest).resolve()
+def _upstream(path: Path, module: str) -> Path:
+    """从当前清单恢复唯一上游，避免命令行重复暴露较早模块的输入。"""
+    manifest = read_manifest(path)
+    matches = [Path(item['manifest']) for item in manifest.get('dependencies', [])
+               if read_manifest(Path(item['manifest'])).get('module') == module]
+    if len(matches) != 1:
+        raise ValueError(f'{path} 无法唯一溯源 {module} 输入')
+    return matches[0]
+
+
+def _read_inputs(context: RunContext, args: argparse.Namespace) -> tuple[Path, Path, Path, Path, Path, pd.DataFrame, pd.DataFrame, dict[str, object]]:
+    """读取 group 的完整干净祖先链与显式注入协议。"""
+    group_manifest = _project_path(context, args.input).resolve()
     protocol_path = _project_path(context, args.protocol).resolve()
-    preprocess_manifest = read_manifest(input_manifest, expected_module='preprocess')
-    split_manifest_value = read_manifest(split_manifest, expected_module='split')
-    if any(manifest.get('dataset_id') != context.dataset_id for manifest in (preprocess_manifest, split_manifest_value)):
-        raise ValueError('preprocess 与 split 必须和本次运行的数据集身份一致')
+    group_value = read_manifest(group_manifest, expected_module='group')
+    segment_manifest = _upstream(group_manifest, 'segment')
+    split_manifest = _upstream(segment_manifest, 'split')
+    preprocess_manifest = _upstream(split_manifest, 'preprocess')
+    if any(read_manifest(path).get('dataset_id') != context.dataset_id
+           for path in (group_manifest, segment_manifest, split_manifest, preprocess_manifest)):
+        raise ValueError('group 的干净祖先链必须和本次运行的数据集身份一致')
     if not protocol_path.is_file():
         raise FileNotFoundError(f'找不到注入协议：{protocol_path}')
-    expected_hash = hash_file(input_manifest)
-    dependencies = split_manifest_value.get('dependencies')
-    if not isinstance(dependencies, list) or not any(
-            isinstance(item, dict) and item.get('sha256') == expected_hash for item in dependencies):
-        raise ValueError('split 清单未声明当前 preprocess manifest 作为已校验依赖')
-    observations = read_table(input_manifest.parent / 'data', 'observations',
+    observations = read_table(preprocess_manifest.parent / 'data', 'observations',
                               dtype={'record_id': 'string', 'flight_id': 'string', 'icao': 'string', 'call': 'string'})
     splits = read_table(split_manifest.parent / 'data', 'splits', dtype={'flight_id': 'string'})
     if tuple(observations.columns) != CANONICAL_COLUMNS or observations.empty:
@@ -85,16 +91,37 @@ def _read_inputs(context: RunContext, args: argparse.Namespace) -> tuple[Path, P
     required_minimum = minimum_required_points(protocol)
     if configured_minimum < required_minimum:
         raise ValueError('injection_minimum_trajectory_points 小于协议最长事件及上下文所需点数')
-    return input_manifest, split_manifest, protocol_path, observations, splits, protocol
+    return (group_manifest, segment_manifest, split_manifest, preprocess_manifest, protocol_path,
+            observations, splits, protocol)
+
+
+def _write_labeled_clean_segments(segment_manifest: Path, labels: pd.DataFrame, data_dir: Path) -> dict[str, int]:
+    """保留干净阶段边界及冻结路由 ID，仅以事件逐点标签覆盖 train/val 片段真值。"""
+    source = segment_manifest.parent / 'data'
+    segments = read_table(source, 'segments', dtype={'segment_id': 'string', 'flight_id': 'string'})
+    mapping = read_table(source, 'point_segment_map', dtype={'segment_id': 'string', 'record_id': 'string', 'flight_id': 'string'})
+    point_labels = mapping[['segment_id', 'record_id']].merge(labels[['record_id', 'injected_label']], on='record_id',
+                                                                how='left', validate='one_to_one')
+    if point_labels['injected_label'].isna().any():
+        raise ValueError('干净片段映射无法匹配注入逐点标签')
+    segment_labels = (point_labels.groupby('segment_id', sort=False)['injected_label'].max()
+                      .astype(np.int8).rename('segment_label').reset_index())
+    segments = segments.drop(columns=['segment_label']).merge(segment_labels, on='segment_id', how='left', validate='one_to_one')
+    if segments['segment_label'].isna().any():
+        raise ValueError('注入后训练／验证片段标签不完整')
+    write_table(mapping, data_dir, 'point_segment_map')
+    write_table(segments, data_dir, 'segments')
+    return {'labeled_segments': int(len(segments)), 'anomalous_segments': int(segments['segment_label'].sum())}
 
 
 def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
-    """按固定 split 注入单个事件，写入最终观测、标签、事件和影响范围账本。"""
-    input_manifest, split_manifest, protocol_path, observations, splits, protocol = _read_inputs(context, args)
+    """在冻结干净 group 后按固定计划注入，并为 train/val 片段补写真值。"""
+    (group_manifest, segment_manifest, split_manifest, preprocess_manifest, protocol_path,
+     observations, splits, protocol) = _read_inputs(context, args)
     planned_injections = int((splits['injection_plan'].eq('abnormal') & splits['injection_eligible']).sum())
     injection_workers = min(context.workers, planned_injections)
-    context.logger.debug('注入输入：preprocess=%s；split=%s；协议=%s；观测=%d；航班=%d；协议事件=%s',
-                         input_manifest, split_manifest, protocol_path, len(observations), len(splits),
+    context.logger.debug('注入输入：group=%s；segment=%s；split=%s；preprocess=%s；协议=%s；观测=%d；航班=%d；协议事件=%s',
+                         group_manifest, segment_manifest, split_manifest, preprocess_manifest, protocol_path, len(observations), len(splits),
                          list(protocol['event_type_probabilities']))
     context.logger.info('开始航班级异常注入：eligible_abnormal_flights=%d，workers=%d，队列上限=%d',
                         planned_injections, injection_workers, injection_workers * 2)
@@ -108,11 +135,13 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
     write_table(event_table, data_dir, 'injection_events')
     write_table(impact_table, data_dir, 'injection_impacts')
     write_table(outcome_table, data_dir, 'injection_outcomes')
+    segment_summary = _write_labeled_clean_segments(segment_manifest, label_table, data_dir)
     actual_flight_labels = final_observations.groupby('flight_id', sort=False)['injected_label'].max()
     outcome_counts = outcome_table['injection_outcome'].value_counts().to_dict()
     summary: dict[str, object] = {
-        'input_manifest': str(input_manifest), 'split_manifest': str(split_manifest), 'protocol': str(protocol_path),
-        'protocol_sha256': hash_file(protocol_path), 'flight_gap_seconds': _flight_gap_seconds(input_manifest),
+        'input_manifest': str(group_manifest), 'segment_manifest': str(segment_manifest), 'split_manifest': str(split_manifest),
+        'preprocess_manifest': str(preprocess_manifest), 'protocol': str(protocol_path),
+        'protocol_sha256': hash_file(protocol_path), 'flight_gap_seconds': _flight_gap_seconds(preprocess_manifest),
         'injection_minimum_trajectory_points': Env.get_int('injection_minimum_trajectory_points'),
         'minimum_event_support_points': minimum_required_points(protocol),
         'injection_workers': injection_workers,
@@ -121,12 +150,12 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
         'anomalous_records': int(final_observations['injected_label'].sum()),
         'normal_records': int(len(final_observations) - final_observations['injected_label'].sum()),
         'events': int(len(event_table)), 'outcomes': {str(key): int(value) for key, value in outcome_counts.items()},
-        'protocol_schema_version': protocol['schema_version'],
+        'protocol_schema_version': protocol['schema_version'], **segment_summary,
     }
     context.logger.info('注入完成：航班=%d，异常航班=%d，异常记录=%d，事件=%d，结果=%s',
                         summary['flights'], summary['abnormal_flights'], summary['anomalous_records'],
                         summary['events'], summary['outcomes'])
-    return ModuleResult(summary=summary, dependencies=(input_manifest, split_manifest))
+    return ModuleResult(summary=summary, dependencies=(group_manifest,))
 
 
 def _inject_observations(observations: pd.DataFrame, splits: pd.DataFrame, protocol: dict[str, object],
@@ -363,7 +392,7 @@ def _flight_gap_seconds(input_manifest: Path) -> float:
 
 def validate_outputs(context: RunContext, args: argparse.Namespace, result: ModuleResult) -> ValidationReport:
     """重新读取产物，验证单副本、事件区间、标签、影响账本与跳过政策完全一致。"""
-    _, _, _, original, splits, _ = _read_inputs(context, args)
+    (_, segment_manifest, _, _, _, original, splits, _) = _read_inputs(context, args)
     data_dir = context.staging_dir / 'data'
     observations = read_table(data_dir, 'observations', dtype={'record_id': 'string', 'flight_id': 'string', 'icao': 'string', 'call': 'string'})
     labels = read_table(data_dir, 'record_labels', dtype={'record_id': 'string', 'flight_id': 'string'})
@@ -371,11 +400,19 @@ def validate_outputs(context: RunContext, args: argparse.Namespace, result: Modu
                                                               'end_record_id_exclusive': 'string'})
     impacts = read_table(data_dir, 'injection_impacts', dtype={'flight_id': 'string', 'event_id': 'string'})
     outcomes = read_table(data_dir, 'injection_outcomes', dtype={'flight_id': 'string'})
+    segments = read_table(data_dir, 'segments', dtype={'segment_id': 'string', 'flight_id': 'string'})
+    mapping = read_table(data_dir, 'point_segment_map', dtype={'segment_id': 'string', 'record_id': 'string'})
     if tuple(observations.columns) != OBSERVATION_COLUMNS:
         raise ValueError('inject 最终观测字段或顺序不符合约定')
     if tuple(labels.columns) != LABEL_COLUMNS or tuple(events.columns) != EVENT_COLUMNS or tuple(impacts.columns) != IMPACT_COLUMNS:
         raise ValueError('记录标签、事件账本或影响账本字段不符合约定')
     validate_provenance(original, observations, labels, events, impacts)
+    expected_segment_labels = (mapping[['segment_id', 'record_id']].merge(labels[['record_id', 'injected_label']], on='record_id',
+                                                                             validate='one_to_one')
+                               .groupby('segment_id')['injected_label'].max())
+    actual_segment_labels = segments.set_index('segment_id')['segment_label']
+    if not expected_segment_labels.astype(np.int8).equals(actual_segment_labels.reindex(expected_segment_labels.index).astype(np.int8)):
+        raise ValueError('注入后训练／验证片段标签不等于逐点标签 OR')
     if outcomes['flight_id'].duplicated().any() or set(outcomes['flight_id']) != set(observations['flight_id']):
         raise ValueError('航班注入结果表未覆盖每条来源航班一次')
     plans = splits.set_index('flight_id')['injection_plan']
