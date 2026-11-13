@@ -18,8 +18,8 @@ from src.data_processing.phase_pipeline import PipelineConfig, process_cleaned_c
 
 def build_parser() -> argparse.ArgumentParser:
     """定义阶段识别模块参数。"""
-    parser = ProjectArgumentParser(prog='main.py -m segment', description='对最终观测执行 Sun 阶段识别并生成片段。')
-    parser.add_argument('--input', required=True, type=Path, help='preprocess 或未来 inject 模块已发布的 manifest.json')
+    parser = ProjectArgumentParser(prog='main.py -m segment', description='对训练／验证集的干净观测执行 Sun 阶段识别并生成片段。')
+    parser.add_argument('--input', required=True, type=Path, help='split 模块已发布的 manifest.json')
     parser.add_argument('--flight-gap-seconds', type=float,
                         help='来源航班断开阈值；省略时继承 preprocess 记录的值')
     parser.add_argument('--window-seconds', type=float, default=60.0)
@@ -54,6 +54,16 @@ def _upstream_gap(manifest_path: Path) -> float:
     return gap
 
 
+def _preprocess_manifest(split_manifest: Path) -> Path:
+    """从唯一直接 split 输入恢复其 preprocess 祖先，不要求用户重复指定路径。"""
+    manifest = read_manifest(split_manifest, expected_module='split')
+    matches = [Path(item['manifest']) for item in manifest.get('dependencies', [])
+               if read_manifest(Path(item['manifest'])).get('module') == 'preprocess']
+    if len(matches) != 1:
+        raise ValueError('split 清单无法唯一溯源 preprocess 输入')
+    return matches[0]
+
+
 def _write_segment_tables(data_dir: Path, phase_dir: Path) -> dict[str, int]:
     """回接可识别记录，并为按航班排除的数值失败轨迹保存稳定 ID 报告。"""
     observations = read_table(data_dir, 'input_observations', dtype={'record_id': 'string', 'flight_id': 'string'})
@@ -62,9 +72,12 @@ def _write_segment_tables(data_dir: Path, phase_dir: Path) -> dict[str, int]:
     unrecognized_points = pd.read_csv(phase_dir / 'unrecognized_points.csv', dtype={'flight_id': 'string'})
     observations['_pipeline_row_index'] = np.arange(len(observations), dtype=np.int64)
     has_split = 'split' in observations.columns
+    has_plan = 'injection_plan' in observations.columns
     observation_columns = ['record_id', 'flight_id', 'time_ns', 'injected_label', '_pipeline_row_index']
     if has_split:
         observation_columns.append('split')
+    if has_plan:
+        observation_columns.append('injection_plan')
     mapping = points.merge(observations[observation_columns],
                            left_on='source_row_index', right_on='_pipeline_row_index', how='left',
                            suffixes=('_phase', '_observation'), validate='one_to_one')
@@ -76,6 +89,8 @@ def _write_segment_tables(data_dir: Path, phase_dir: Path) -> dict[str, int]:
     mapping_columns = ['record_id', 'flight_id', 'time_ns', 'phase', 'segment_id', 'injected_label']
     if has_split:
         mapping_columns.append('split')
+    if has_plan:
+        mapping_columns.append('injection_plan')
     mapping = mapping[mapping_columns]
     if mapping['record_id'].duplicated().any() or mapping['segment_id'].isna().any():
         raise RuntimeError('点到片段映射不完整')
@@ -105,6 +120,11 @@ def _write_segment_tables(data_dir: Path, phase_dir: Path) -> dict[str, int]:
         if segment_splits['segment_id'].duplicated().any():
             raise RuntimeError('同一阶段片段不能跨 split')
         segments = segments.merge(segment_splits, on='segment_id', how='left', validate='one_to_one')
+    if has_plan:
+        segment_plans = mapping[['segment_id', 'injection_plan']].drop_duplicates()
+        if segment_plans['segment_id'].duplicated().any():
+            raise RuntimeError('同一阶段片段不能跨注入计划')
+        segments = segments.merge(segment_plans, on='segment_id', how='left', validate='one_to_one')
     if segments['segment_label'].isna().any() or not set(segments['segment_id']).issubset(set(mapping['segment_id'])):
         raise RuntimeError('片段标签或映射不完整')
     write_table(mapping, data_dir, 'point_segment_map')
@@ -119,43 +139,94 @@ def _write_segment_tables(data_dir: Path, phase_dir: Path) -> dict[str, int]:
             'unrecognized_flights': int(len(unrecognized)), 'unrecognized_points': int(len(excluded))}
 
 
-def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
-    """运行既有 Sun 数值实现，并将其结果转换为可独立读取的 S0。"""
-    input_manifest = _project_path(context, args.input).resolve()
-    manifest = read_manifest(input_manifest)
-    if manifest.get('module') not in {'preprocess', 'inject'}:
-        raise ValueError('segment 只能读取 preprocess 或 inject 的最终观测')
-    if manifest.get('dataset_id') != context.dataset_id:
-        raise ValueError('上游数据集身份与本次从 --input 自动识别的身份不一致')
-    source_dir = input_manifest.parent / 'data'
-    source = source_dir / 'observations.parquet'
-    if not source.is_file():
-        raise FileNotFoundError(f'上游缺少规范观测：{source}')
-    gap = args.flight_gap_seconds if args.flight_gap_seconds is not None else _upstream_gap(input_manifest)
-    data_dir = context.staging_dir / 'data'
-    data_dir.mkdir()
-    shutil.copy2(source, data_dir / 'input_observations.parquet')
+def _sequence_category(phases: tuple[str, ...]) -> str:
+    """仅审计 Sun 原始序列，不在未核验前擅自合并或改写阶段标签。"""
+    if not phases or set(phases) == {'GND'}:
+        return 'ground_only'
+    first_gnd, last_gnd = phases[0] == 'GND', phases[-1] == 'GND'
+    if first_gnd and last_gnd:
+        return 'complete_or_ground_return'
+    if first_gnd:
+        return 'departure_side'
+    if last_gnd:
+        return 'arrival_side'
+    if set(phases) == {'CR'}:
+        return 'cruise_only'
+    if 'CR' not in phases and 'LVL' in phases:
+        return 'partial_level_flight'
+    return 'airborne_or_unresolved'
+
+
+def _write_sequence_review(data_dir: Path) -> dict[str, int]:
+    """输出按航班排列的原始阶段序列，作为后续语义二次处理的审计基线。"""
+    segments = read_table(data_dir, 'segments', dtype={'segment_id': 'string', 'flight_id': 'string'})
+    rows: list[dict[str, object]] = []
+    for flight_id, frame in segments.sort_values(['flight_id', 'ordinal'], kind='stable').groupby('flight_id', sort=False):
+        phases = tuple(frame['phase'].astype(str))
+        rows.append({'flight_id': str(flight_id), 'icao': str(frame['icao'].iloc[0]), 'call': str(frame['call'].iloc[0]),
+                     'segments': int(len(frame)), 'phase_sequence': '>'.join(phases),
+                     'semantic_category': _sequence_category(phases),
+                     'starts_ground': phases[0] == 'GND', 'ends_ground': phases[-1] == 'GND'})
+    review = pd.DataFrame(rows)
+    write_table(review, data_dir, 'flight_phase_sequences')
+    return {str(key): int(value) for key, value in review['semantic_category'].value_counts().items()}
+
+
+def segment_observations(observations: pd.DataFrame, data_dir: Path, args: argparse.Namespace,
+                         workers: int, logger: object, flight_gap_seconds: float) -> dict[str, object]:
+    """在指定目录分段一份已带 split/标签的观测表，供正式 segment 与 detect 测试复用。"""
+    required = {'record_id', 'flight_id', 'icao', 'call', 'time_ns', 'longitude_deg', 'latitude_deg',
+                'geometric_altitude_m', 'barometric_altitude_m', 'heading_deg', 'speed_mps',
+                'injected_label', 'split'}
+    if observations.empty or not required.issubset(observations.columns):
+        raise ValueError('阶段识别输入缺少规范观测、分区或逐点标签字段')
+    data_dir.mkdir(parents=True, exist_ok=True)
+    write_table(observations, data_dir, 'input_observations')
     staged_source = data_dir / '.input_observations.runtime.csv'
     export_csv(data_dir, 'input_observations', staged_source)
-    config = PipelineConfig(altitude_unit='m', speed_unit='m/s', workers=context.workers,
+    config = PipelineConfig(altitude_unit='m', speed_unit='m/s', workers=workers,
                             chunk_rows=args.chunk_rows, buckets=args.buckets, window_seconds=args.window_seconds,
-                            flight_gap_seconds=gap, timestamp_unit='ns')
-    context.logger.debug('阶段识别输入：manifest=%s；gap=%s；window=%s；chunk_rows=%d；buckets=%d；workers=%d',
-                         input_manifest, gap, args.window_seconds, args.chunk_rows, args.buckets, context.workers)
+                            flight_gap_seconds=flight_gap_seconds, timestamp_unit='ns')
+    logger.debug('阶段识别运行：observations=%d；gap=%s；window=%s；chunk_rows=%d；buckets=%d；workers=%d',
+                 len(observations), flight_gap_seconds, args.window_seconds, args.chunk_rows, args.buckets, workers)
     summary = process_cleaned_csv(staged_source, data_dir / 'phase', config,
                                   column_overrides={'icao': 'icao', 'call': 'call', 'time': 'time_ns',
                                                     'altitude': 'geometric_altitude_m', 'speed': 'speed_mps',
                                                     'longitude': 'longitude_deg', 'latitude': 'latitude_deg'},
-                                  progress_database=data_dir / 'segment_progress.sqlite',
-                                  logger=context.logger)
+                                  progress_database=data_dir / 'segment_progress.sqlite', logger=logger)
     linked = _write_segment_tables(data_dir, data_dir / 'phase')
     staged_source.unlink()
     shutil.rmtree(data_dir / 'phase')
-    combined: dict[str, object] = {'input_manifest': str(input_manifest), 'flight_gap_seconds': gap,
-                                   'window_seconds': args.window_seconds, **summary, **linked}
+    categories = _write_sequence_review(data_dir)
+    return {**summary, **linked, 'sequence_categories': categories}
+
+
+def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
+    """仅对训练／验证集的干净轨迹执行 Sun 阶段识别，冻结后不受注入扰动。"""
+    input_manifest = _project_path(context, args.input).resolve()
+    manifest = read_manifest(input_manifest, expected_module='split')
+    if manifest.get('dataset_id') != context.dataset_id:
+        raise ValueError('上游数据集身份与本次从 --input 自动识别的身份不一致')
+    preprocess = _preprocess_manifest(input_manifest)
+    observations = read_table(preprocess.parent / 'data', 'observations',
+                              dtype={'record_id': 'string', 'flight_id': 'string', 'icao': 'string', 'call': 'string'})
+    splits = read_table(input_manifest.parent / 'data', 'splits', dtype={'flight_id': 'string'})
+    if observations.empty or splits.empty or splits['flight_id'].duplicated().any():
+        raise ValueError('preprocess 观测或 split 航班计划为空／重复')
+    observations = observations.merge(splits[['flight_id', 'split', 'injection_plan']], on='flight_id',
+                                      how='inner', validate='many_to_one')
+    observations = observations.loc[observations['split'].isin(('train', 'val'))].copy()
+    observations['injected_label'] = np.int8(0)
+    if observations.empty:
+        raise ValueError('split 后没有训练或验证观测可供干净分段')
+    gap = args.flight_gap_seconds if args.flight_gap_seconds is not None else _upstream_gap(preprocess)
+    data_dir = context.staging_dir / 'data'
+    summary = segment_observations(observations, data_dir, args, context.workers, context.logger, gap)
+    combined: dict[str, object] = {'input_manifest': str(input_manifest), 'preprocess_manifest': str(preprocess),
+                                   'flight_gap_seconds': gap, 'window_seconds': args.window_seconds, **summary}
     context.logger.info('阶段片段完成：可识别点=%d，片段=%d，异常片段=%d，不可识别航班=%d／点=%d',
-                        linked['points'], linked['segments'], linked['anomalous_segments'],
-                        linked['unrecognized_flights'], linked['unrecognized_points'])
+                        summary['points'], summary['segments'], summary['anomalous_segments'],
+                        summary['unrecognized_flights'], summary['unrecognized_points'])
     return ModuleResult(summary=combined, dependencies=(input_manifest,))
 
 
@@ -186,6 +257,8 @@ def validate_outputs(context: RunContext, args: argparse.Namespace, result: Modu
                 or set(mapping['split']) - {'train', 'val', 'test'}
                 or not mapping.groupby('segment_id')['split'].nunique().eq(1).all()):
             raise ValueError('注入后的 split 未正确传递到阶段输出')
+    if not set(observations['split']).issubset({'train', 'val'}):
+        raise ValueError('正式 segment 只能处理训练／验证集；测试集应由 detect 动态分段')
     return ValidationReport(checks={'observations': int(len(observations)), 'recognized_points': int(len(mapping)),
                                     'unrecognized_points': int(len(excluded)), 'segments': int(len(segments)),
                                     'point_conservation': True, 'segment_label_or_verified': True})
