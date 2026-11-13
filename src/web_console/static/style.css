@@ -27,7 +27,7 @@ code { color: #a5f3fc; }
 .nav-item { display: block; width: 100%; margin: 2px 0; border: 1px solid transparent; background: transparent; color: #cbd5e1; text-align: left; }
 .nav-item:hover:not(:disabled), .nav-item.selected { border-color: #1e4d73; background: #12314a; color: #e0f2fe; }
 .sidebar-note { margin: 20px 9px 0; color: #94a3b8; font-size: .83rem; }
-.workspace { width: min(1280px, 100%); margin: 0 auto; padding: 35px 38px 64px; }
+.workspace { width: 100%; max-width: none; margin: 0; padding: 35px 38px 64px; }
 .workspace-header { display: flex; justify-content: space-between; gap: 24px; align-items: center; margin-bottom: 25px; }
 .session-actions { display: flex; align-items: center; gap: 13px; color: #94a3b8; font-size: .85rem; }
 .panel { margin-bottom: 22px; padding: 25px; border: 1px solid #334155; border-radius: 10px; background: #172033; box-shadow: 0 16px 40px #02061744; }

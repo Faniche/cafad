@@ -18,7 +18,7 @@ def list_module_history(project_root: Path, module_name: str) -> list[dict[str, 
         if not dataset_dir.is_dir() or dataset_dir.name.startswith('.'):
             continue
         for run_dir in dataset_dir.iterdir():
-            if not run_dir.is_dir():
+            if not run_dir.is_dir() or (run_dir.name.startswith('.') and not run_dir.name.endswith('.pending')):
                 continue
             entry = _entry_from_directory(project_root, module_name, run_dir)
             if entry is not None:

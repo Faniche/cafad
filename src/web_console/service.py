@@ -26,19 +26,15 @@ MAX_LOG_LINES = 10_000
 MAX_STORED_JOBS = 20
 UPSTREAM_MANIFEST_INPUTS = {
     'split': {'input': 'preprocess'},
-    'inject': {'input': 'preprocess', 'split_manifest': 'split'},
-    # 网页遵循正式链路：segment 只接收 inject 的最终观测。命令行仍保留
-    # preprocess 直接输入，供小型诊断或基线排查显式使用。
-    'segment': {'input': 'inject'},
+    'segment': {'input': 'split'},
     'group': {'input': 'segment'},
-    'train': {'input': 'group'},
+    'inject': {'input': 'group'},
+    'train': {'input': 'inject'},
     'calibrate': {'input': 'train'},
     'detect': {'input': 'calibrate'},
     'evaluate': {'input': 'detect'},
 }
-AUTO_DERIVED_MANIFEST_INPUTS = {
-    'inject': {'input': ('split_manifest', 'split', 'preprocess')},
-}
+AUTO_DERIVED_MANIFEST_INPUTS: dict[str, dict[str, tuple[str, str, str]]] = {}
 
 
 class LogWriter(Protocol):

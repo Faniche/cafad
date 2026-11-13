@@ -3,6 +3,7 @@ from functools import lru_cache
 from pathlib import Path
 import numpy as np
 import pandas as pd
+from src.app.tables import read_table
 from .history import _artifact_directory, _read_json_object
 
 
@@ -23,7 +24,8 @@ def group_result(root: Path, artifact: str) -> dict[str, object]:
     if len(segmented) != 1:
         raise ValueError('无法唯一定位 group 的 segment 上游')
     source = segmented[0] / 'data'
-    files = [directory / 'data/routing_segments.csv', source / 'point_segment_map.csv', source / 'input_observations.csv']
+    files = [_table_file(directory / 'data', 'routing_segments'), _table_file(source, 'point_segment_map'),
+             _table_file(source, 'input_observations')]
     signature = tuple((file.stat().st_mtime_ns, file.stat().st_size) for file in files)
     return _build(directory, source, signature)
 
@@ -31,9 +33,9 @@ def group_result(root: Path, artifact: str) -> dict[str, object]:
 @lru_cache(maxsize=2)
 def _build(directory: Path, source: Path, signature: tuple) -> dict[str, object]:
     """统计使用全部成员点；图每片段最多24点，观测分块读取限制额外内存。"""
-    members = pd.read_csv(directory / 'data/routing_segments.csv', dtype=str)
-    mapping = pd.read_csv(source / 'point_segment_map.csv', usecols=['record_id', 'segment_id', 'time_ns'],
-                          dtype={'record_id': str, 'segment_id': str}).sort_values('time_ns', kind='stable')
+    members = _read(directory / 'data', 'routing_segments').astype(str)
+    mapping = _read(source, 'point_segment_map', columns=['record_id', 'segment_id', 'time_ns'],
+                    dtype={'record_id': str, 'segment_id': str}).sort_values('time_ns', kind='stable')
     if mapping['record_id'].duplicated().any() or members['segment_id'].duplicated().any():
         raise ValueError('点映射或分组成员存在重复 ID')
     segment_groups = members.set_index('segment_id')['group_id'].to_dict()
@@ -44,8 +46,8 @@ def _build(directory: Path, source: Path, signature: tuple) -> dict[str, object]
     point_map = mapping.set_index('record_id')['segment_id']
     partials, plotted = [], []
     fields = ['longitude_deg', 'latitude_deg', 'geometric_altitude_m']
-    for chunk in pd.read_csv(source / 'input_observations.csv', usecols=['record_id', 'time_ns', *fields],
-                             dtype={'record_id': str}, chunksize=100_000):
+    observations = _read(source, 'input_observations', columns=['record_id', 'time_ns', *fields], dtype={'record_id': str})
+    for chunk in (observations.iloc[start:start + 100_000].copy() for start in range(0, len(observations), 100_000)):
         chunk['segment_id'] = chunk['record_id'].map(point_map)
         known = chunk.loc[chunk['segment_id'].isin(segment_groups)].copy()
         if not known.empty:
@@ -84,3 +86,19 @@ def _build(directory: Path, source: Path, signature: tuple) -> dict[str, object]
                     for sid, frame in pd.concat(plotted).sort_values('time_ns', kind='stable').groupby('segment_id', sort=False)]
     return {'groups': groups, 'trajectories': trajectories,
             'note': '统计为建组正常训练成员的全部观测；时间为 UTC，高度为几何高度（米）。图包含该 segment 产物中全部片段，每片段最多24个展示点；灰色为未参与建组的片段。范围框是经纬高外包框，允许重叠，不代表互斥空域；各轴独立缩放。'}
+
+
+def _table_file(directory: Path, name: str) -> Path:
+    """新 Parquet 优先；只读兼容旧已发布 CSV，避免历史结果无法查看。"""
+    parquet = directory / f'{name}.parquet'
+    return parquet if parquet.is_file() else directory / f'{name}.csv'
+
+
+def _read(directory: Path, name: str, **kwargs: object) -> pd.DataFrame:
+    """读取当前 Parquet 或旧历史 CSV；正式新产物只写 Parquet。"""
+    if (directory / f'{name}.parquet').is_file():
+        return read_table(directory, name, **kwargs)
+    csv_kwargs = dict(kwargs)
+    if 'columns' in csv_kwargs:
+        csv_kwargs['usecols'] = csv_kwargs.pop('columns')
+    return pd.read_csv(directory / f'{name}.csv', **csv_kwargs)

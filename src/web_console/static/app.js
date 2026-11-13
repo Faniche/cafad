@@ -36,11 +36,13 @@ const historySummary = document.querySelector('#history-summary');
 const historyLogs = document.querySelector('#history-logs');
 const historyHead = document.querySelector('#history-head');
 const groupResult = document.querySelector('#group-result');
+const segmentResult = document.querySelector('#segment-result');
 let historyColumns = [];
 let historyRunning = false;
 let historyStateTimer = null;
 let historyVersion = 0;
 let detailVersion = 0;
+let segmentTimer = null;
 const restartButton = document.querySelector('#restart-button');
 const logoutButton = document.querySelector('#logout-button');
 const fileDialog = document.querySelector('#file-dialog');
@@ -570,6 +572,8 @@ function clearHistory() {
   historyVersion += 1; detailVersion += 1; historyRunning = false;
   if (historyStateTimer) clearInterval(historyStateTimer); historyStateTimer = null;
   groupResult.hidden = true; groupResult.replaceChildren();
+  if (segmentTimer) clearInterval(segmentTimer); segmentTimer = null;
+  segmentResult.hidden = true; segmentResult.replaceChildren();
   historyPanel.hidden = true; historyRows.replaceChildren(); historyDetail.hidden = true;
   historyStatus.textContent = ''; historySummary.textContent = ''; historyLogs.textContent = '';
 }
@@ -582,6 +586,8 @@ async function loadHistory(moduleName, manual = false) {
   renderHistoryHead();
   if (historyStateTimer) clearInterval(historyStateTimer); historyStateTimer = null;
   groupResult.hidden = true; groupResult.replaceChildren();
+  if (segmentTimer) clearInterval(segmentTimer); segmentTimer = null;
+  segmentResult.hidden = true; segmentResult.replaceChildren();
   historyRefresh.disabled = true;
   historyPanel.hidden = false; historyStatus.textContent = '正在读取历史运行…'; historyRows.replaceChildren();
   historyDetail.hidden = true; historySummary.textContent = ''; historyLogs.textContent = '';
@@ -594,6 +600,8 @@ async function loadHistory(moduleName, manual = false) {
     historyStatus.textContent = runs.length ? `共 ${runs.length} 条运行记录。` : '该模块尚无落盘运行。';
     runs.forEach((run) => appendHistoryRow(moduleName, run));
     setJobControls(jobStatus.textContent);
+    const activeSegment = moduleName === 'segment' ? runs.find((run) => run.state === 'running') : null;
+    if (activeSegment?.artifact) void loadHistoryDetail(moduleName, activeSegment.artifact);
     if (historyRunning) watchHistoryCompletion(moduleName);
   } catch (error) {
     if (selectedModule === moduleName && version === historyVersion) { historyStatus.textContent = `读取历史运行失败：${error.message}`; setJobControls(jobStatus.textContent); }
@@ -640,6 +648,8 @@ function appendHistoryRow(moduleName, run) {
 
 async function loadHistoryDetail(moduleName, artifact) {
   const version = ++detailVersion; groupResult.hidden = true; groupResult.replaceChildren();
+  if (segmentTimer) clearInterval(segmentTimer); segmentTimer = null;
+  segmentResult.hidden = true; segmentResult.replaceChildren();
   if (moduleName === 'train') startTrainMonitor(artifact);
   try {
     const data = await apiRequest(`/api/history/detail?module=${encodeURIComponent(moduleName)}&artifact=${encodeURIComponent(artifact)}`);
@@ -653,6 +663,17 @@ async function loadHistoryDetail(moduleName, artifact) {
       apiRequest(`/api/group/result?artifact=${encodeURIComponent(artifact)}`).then((result) => {
         if (selectedModule === moduleName && version === detailVersion) renderGroupResult(groupResult, result);
       }).catch((error) => { if (version === detailVersion) groupResult.textContent = `分组展示失败：${error.message}`; });
+    }
+    if (moduleName === 'segment') {
+      segmentResult.hidden = false;
+      const refresh = async () => {
+        try {
+          const result = await apiRequest(`/api/segment/result?artifact=${encodeURIComponent(artifact)}`);
+          if (selectedModule === 'segment' && version === detailVersion) renderSegmentResult(segmentResult, result);
+        } catch (error) { if (version === detailVersion) segmentResult.textContent = `阶段进度读取失败：${error.message}`; }
+      };
+      await refresh();
+      if (data.entry?.state === 'running') segmentTimer = setInterval(refresh, 1000);
     }
     return data;
   } catch (error) {
@@ -698,6 +719,7 @@ settingsForm.addEventListener('submit', async (event) => {
     }
     currentJob = data.job_id; command.textContent = data.command.join(' '); jobStatus.textContent = data.status; setJobControls(data.status);
     if (data.history_entry) { appendHistoryRow(selectedModule, {...data.history_entry, state:data.status}); historyRows.prepend(historyRows.lastElementChild); }
+    if (selectedModule === 'segment') window.setTimeout(() => { void loadHistory('segment'); }, 500);
     if (selectedModule === 'train') startTrainMonitor();
     stopPolling(); await pollJob(); pollTimer = setInterval(pollJob, 700);
   } catch (error) { formStatus.textContent = error.message; setJobControls(); jobStatus.textContent = '未启动'; }

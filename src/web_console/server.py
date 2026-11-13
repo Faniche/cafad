@@ -6,6 +6,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+import sqlite3
 import sys
 from time import sleep
 from pathlib import Path
@@ -23,6 +24,7 @@ from .train_monitor import training_progress
 from .train_util import TrainTaskQueue
 from .web_util import ModuleHistoryUtil
 from .group_view import group_result
+from .segment_view import segment_result
 from .service import JobManager, build_command, module_catalog, module_schemas, serialize_schemas, upstream_manifest_choices
 
 
@@ -119,6 +121,9 @@ def create_handler(
             if parsed.path == '/static/group_view.js':
                 _static_response(self, 'group_view.js', 'text/javascript; charset=utf-8')
                 return
+            if parsed.path == '/static/segment_view.js':
+                _static_response(self, 'segment_view.js', 'text/javascript; charset=utf-8')
+                return
             if parsed.path == '/static/style.css':
                 _static_response(self, 'style.css', 'text/css; charset=utf-8')
                 return
@@ -175,6 +180,13 @@ def create_handler(
                     artifact = parse_qs(parsed.query).get('artifact', [''])[0]
                     _json_response(self, HTTPStatus.OK, group_result(project_root, artifact))
                 except (ValueError, OSError, KeyError) as exc:
+                    _json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
+                return
+            if parsed.path == '/api/segment/result':
+                try:
+                    artifact = parse_qs(parsed.query).get('artifact', [''])[0]
+                    _json_response(self, HTTPStatus.OK, segment_result(project_root, artifact))
+                except (ValueError, OSError, sqlite3.Error) as exc:
                     _json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
                 return
             if parsed.path == '/api/jobs/latest':

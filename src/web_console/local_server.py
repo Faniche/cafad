@@ -163,7 +163,7 @@ def _page_html(state: LocalPlotState) -> str:
 <p><button type="submit">画图／更新选择</button></p></td><td valign="top"><h3>三维图</h3>{image}<p>{summary}</p></td>
 <td width="190" valign="top"><h3>显示方式</h3><p><label><input type="checkbox" name="whole_flight" value="1"{checked}> 按整条轨迹展示</label></p>
 <p>未勾选时按阶段片段展示；勾选后展示所选分组成员所属航班的完整轨迹。</p></td></tr></table></form>
-<hr><p>数据集应包含 record_id、flight_id、time_ns、longitude_deg、latitude_deg、geometric_altitude_m。分组元数据使用 routing_segments.csv 或其 group manifest.json。</p></td></tr></table></body></html>'''
+<hr><p>数据集应包含 record_id、flight_id、time_ns、longitude_deg、latitude_deg、geometric_altitude_m。正式数据使用 Parquet；分组元数据使用 routing_segments.parquet 或其 group manifest.json。</p></td></tr></table></body></html>'''
 
 
 def _options(values: tuple[str, ...], selected: str | None, all_label: str) -> str:

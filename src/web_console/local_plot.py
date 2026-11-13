@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 
 import matplotlib
+import duckdb
 import numpy as np
 import pandas as pd
 
@@ -41,22 +42,23 @@ class GroupIndex:
 
 
 def locate_routing_metadata(path: Path) -> Path:
-    """接受 routing_segments.csv 或 group 运行 manifest，并定位成员描述 CSV。"""
+    """接受 Parquet 分组成员表或 group manifest，并定位正式成员表。"""
     selected = path.expanduser().resolve()
-    if selected.name == 'routing_segments.csv':
+    if selected.name in {'routing_segments.parquet', 'routing_segments.csv'}:
         candidate = selected
     elif selected.name == 'manifest.json':
-        candidate = selected.parent / 'data' / 'routing_segments.csv'
+        candidate = _table_candidate(selected.parent / 'data', 'routing_segments')
     else:
-        candidate = selected.parent / 'routing_segments.csv'
+        candidate = _table_candidate(selected.parent, 'routing_segments')
     if not candidate.is_file():
-        raise ValueError('分组元数据应为 routing_segments.csv，或其所属 group 运行的 manifest.json')
+        raise ValueError('分组元数据应为 routing_segments.parquet，或其所属 group 运行的 manifest.json')
     return candidate
 
 
 def locate_point_map(dataset_path: Path, routing_path: Path) -> Path:
     """按本地镜像目录优先级定位 segment 的 record_id 到 segment_id 映射。"""
-    candidates = [dataset_path.parent / 'point_segment_map.csv', routing_path.parent / 'point_segment_map.csv']
+    candidates = [_table_candidate(dataset_path.parent, 'point_segment_map'),
+                  _table_candidate(routing_path.parent, 'point_segment_map')]
     group_manifest = routing_path.parent.parent / 'manifest.json'
     if group_manifest.is_file():
         try:
@@ -68,26 +70,26 @@ def locate_point_map(dataset_path: Path, routing_path: Path) -> Path:
                     continue
                 remote = Path(value)
                 if remote.is_file():
-                    candidates.append(remote.parent / 'data' / 'point_segment_map.csv')
+                    candidates.append(_table_candidate(remote.parent / 'data', 'point_segment_map'))
                     continue
                 parts = remote.parts
                 if 'data' in parts:
                     data_root = next((parent for parent in routing_path.parents if parent.name == 'data'), None)
                     if data_root is not None:
-                        candidates.append(data_root.joinpath(*parts[parts.index('data') + 1:]).parent / 'data' /
-                                          'point_segment_map.csv')
+                        candidates.append(_table_candidate(
+                            data_root.joinpath(*parts[parts.index('data') + 1:]).parent / 'data', 'point_segment_map'))
         except (OSError, ValueError, json.JSONDecodeError):
             pass
     for candidate in candidates:
         if candidate.is_file():
             return candidate.resolve()
-    raise ValueError('找不到 point_segment_map.csv。请选择 segment 运行 data/input_observations.csv，或保持 data 目录镜像结构。')
+    raise ValueError('找不到 point_segment_map.parquet。请选择 segment 运行 data/input_observations.parquet，或保持 data 目录镜像结构。')
 
 
 def load_group_index(dataset_path: Path, metadata_path: Path) -> GroupIndex:
     """加载并校验分组成员，且只保留绘图实际使用的字段。"""
     routing_path = locate_routing_metadata(metadata_path)
-    members = pd.read_csv(routing_path, usecols=['segment_id', 'group_id', 'flight_id'], dtype='string')
+    members = _read_table_file(routing_path, ['segment_id', 'group_id', 'flight_id'])
     if members.empty or members.isna().any().any() or members['segment_id'].duplicated().any():
         raise ValueError('routing_segments.csv 为空、字段缺失或同一片段被分配到多个组')
     return GroupIndex(routing_path, locate_point_map(dataset_path, routing_path), members)
@@ -130,12 +132,19 @@ def render_plot(dataset_path: Path, index: GroupIndex, group_id: str | None, seg
 
 def _collect_segment_paths(dataset_path: Path, point_map_path: Path, segment_ids: np.ndarray,
                            workers: int) -> dict[str, np.ndarray]:
-    """仅建立已选分组成员的 record_id 索引，避免把完整映射表常驻内存。"""
-    wanted = set(segment_ids.tolist())
-    record_to_segment: dict[str, str] = {}
-    for chunk in pd.read_csv(point_map_path, usecols=['record_id', 'segment_id'], dtype='string', chunksize=200_000):
-        chosen = chunk.loc[chunk['segment_id'].isin(wanted)]
-        record_to_segment.update(zip(chosen['record_id'].astype(str), chosen['segment_id'].astype(str), strict=True))
+    """通过 DuckDB 连接 Parquet，仅读取选中片段的点，避免扫描到 Pandas。"""
+    selected = pd.DataFrame({'segment_id': segment_ids.astype(str)})
+    if point_map_path.suffix == '.csv':
+        records = pd.read_csv(point_map_path, usecols=['record_id', 'segment_id'], dtype='string')
+        records = records.loc[records['segment_id'].isin(selected['segment_id'])]
+    else:
+        with duckdb.connect(':memory:') as database:
+            database.register('selected_segments', selected)
+            records = database.execute(
+                'SELECT mapping.record_id, mapping.segment_id FROM read_parquet(?) AS mapping '
+                'JOIN selected_segments USING (segment_id)', [str(point_map_path)]
+            ).fetchdf()
+    record_to_segment = dict(zip(records['record_id'].astype(str), records['segment_id'].astype(str), strict=True))
     return _collect_paths(dataset_path, record_to_segment, by_record=True, workers=workers)
 
 
@@ -146,25 +155,58 @@ def _collect_flight_paths(dataset_path: Path, flight_ids: np.ndarray, workers: i
 
 def _collect_paths(dataset_path: Path, selected: dict[str, str] | set[str], *, by_record: bool,
                    workers: int) -> dict[str, np.ndarray]:
-    """分块读取观测，按路径动态降采样并保持时间顺序。"""
+    """由 DuckDB 筛选观测并按路径动态降采样，避免完整 CSV 扫描。"""
     paths: dict[str, list[np.ndarray]] = defaultdict(list)
-    for chunk in pd.read_csv(dataset_path, usecols=OBSERVATION_COLUMNS, dtype={'record_id': 'string', 'flight_id': 'string'},
-                             chunksize=200_000):
-        numeric = chunk[['time_ns', 'longitude_deg', 'latitude_deg', 'geometric_altitude_m']].apply(pd.to_numeric, errors='coerce')
-        valid = numeric.notna().all(axis=1)
-        if by_record:
-            keys = chunk['record_id'].astype(str)
-            selected_rows = chunk.loc[valid & keys.isin(selected)].copy()
-            selected_rows['_path'] = selected_rows['record_id'].astype(str).map(selected)
-        else:
-            selected_rows = chunk.loc[valid & chunk['flight_id'].astype(str).isin(selected)].copy()
-            selected_rows['_path'] = selected_rows['flight_id'].astype(str)
-        if selected_rows.empty:
-            continue
-        selected_rows[['time_ns', 'longitude_deg', 'latitude_deg', 'geometric_altitude_m']] = numeric.loc[selected_rows.index]
-        for path_id, frame in selected_rows.groupby('_path', sort=False):
-            paths[str(path_id)].append(frame[['time_ns', 'longitude_deg', 'latitude_deg', 'geometric_altitude_m']].to_numpy(dtype=float))
+    if dataset_path.suffix == '.csv':
+        observations = pd.read_csv(dataset_path, usecols=OBSERVATION_COLUMNS,
+                                   dtype={'record_id': 'string', 'flight_id': 'string'})
+    else:
+        with duckdb.connect(':memory:') as database:
+            if by_record:
+                database.register('selected_records', pd.DataFrame({
+                    'record_id': list(selected), '_path': list(selected.values())
+                }))
+                observations = database.execute(
+                    'SELECT observations.*, selected_records._path FROM read_parquet(?) AS observations '
+                    'JOIN selected_records USING (record_id)', [str(dataset_path)]
+                ).fetchdf()
+            else:
+                database.register('selected_flights', pd.DataFrame({'flight_id': list(selected)}))
+                observations = database.execute(
+                    'SELECT observations.*, observations.flight_id AS _path FROM read_parquet(?) AS observations '
+                    'JOIN selected_flights USING (flight_id)', [str(dataset_path)]
+                ).fetchdf()
+    if observations.empty:
+        return {}
+    if by_record and '_path' not in observations:
+        observations['_path'] = observations['record_id'].astype(str).map(selected)
+    if not by_record:
+        observations['_path'] = observations['flight_id'].astype(str)
+    numeric = observations[['time_ns', 'longitude_deg', 'latitude_deg', 'geometric_altitude_m']].apply(pd.to_numeric, errors='coerce')
+    valid = numeric.notna().all(axis=1)
+    observations = observations.loc[valid].copy()
+    observations[['time_ns', 'longitude_deg', 'latitude_deg', 'geometric_altitude_m']] = numeric.loc[observations.index]
+    for path_id, frame in observations.groupby('_path', sort=False):
+        paths[str(path_id)].append(frame[['time_ns', 'longitude_deg', 'latitude_deg', 'geometric_altitude_m']].to_numpy(dtype=float))
     return _finalize_paths(paths, workers)
+
+
+def _table_candidate(directory: Path, name: str) -> Path:
+    """优先返回正式 Parquet；保留旧 CSV 只为读取历史产物。"""
+    parquet = directory / f'{name}.parquet'
+    return parquet if parquet.is_file() else directory / f'{name}.csv'
+
+
+def _read_table_file(path: Path, columns: list[str]) -> pd.DataFrame:
+    """读取当前 Parquet 或历史 CSV 表，并统一字符串列类型。"""
+    if path.suffix == '.parquet':
+        with duckdb.connect(':memory:') as database:
+            frame = database.execute(
+                'SELECT ' + ', '.join(f'"{column}"' for column in columns) + ' FROM read_parquet(?)', [str(path)]
+            ).fetchdf()
+    else:
+        frame = pd.read_csv(path, usecols=columns, dtype='string')
+    return frame.astype('string')
 
 
 def _finalize_path(item: tuple[str, list[np.ndarray]]) -> tuple[str, np.ndarray]:
