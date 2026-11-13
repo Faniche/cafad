@@ -23,10 +23,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = ProjectArgumentParser(prog='main.py -m split', description='按来源航班划分训练、验证和测试分区。')
     parser.add_argument('--input', required=True, type=Path, help='preprocess 模块已发布的 manifest.json')
     parser.add_argument('--ratios', type=float, nargs=3, default=(0.70, 0.15, 0.15), metavar=('TRAIN', 'VAL', 'TEST'))
-    parser.add_argument('--normal-ratios', type=float, nargs=3, default=(0.50, 0.50, 0.50),
+    parser.add_argument('--normal-ratios', type=float, nargs=3, default=(0.50, 0.50, 0.95),
                         metavar=('TRAIN', 'VAL', 'TEST'),
                         help='各分区中计划保持正常的来源航班比例；与 --anomaly-ratios 逐列相加为 1')
-    parser.add_argument('--anomaly-ratios', type=float, nargs=3, default=(0.50, 0.50, 0.50),
+    parser.add_argument('--anomaly-ratios', type=float, nargs=3, default=(0.50, 0.50, 0.05),
                         metavar=('TRAIN', 'VAL', 'TEST'),
                         help='各分区中计划由 inject 加噪的来源航班比例；尚不代表已经注入')
     return parser
