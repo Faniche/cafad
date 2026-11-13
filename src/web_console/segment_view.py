@@ -7,7 +7,7 @@ import sqlite3
 from .history import _artifact_directory
 
 
-_COLUMNS = ('icao', 'call', 'phase', 'points', 'start_time', 'end_time', 'duration_seconds',
+_COLUMNS = ('flight_id', 'icao', 'call', 'phase', 'points', 'start_time', 'end_time', 'duration_seconds',
             'start_longitude_deg', 'start_latitude_deg', 'end_longitude_deg', 'end_latitude_deg',
             'span_km', 'start_altitude_m', 'end_altitude_m')
 
@@ -22,7 +22,7 @@ def segment_result(project_root: Path, artifact: str) -> dict[str, object]:
     try:
         database.execute('PRAGMA busy_timeout=1000')
         records = database.execute(
-            'SELECT icao, call, phase, points, start_time, end_time, duration_seconds, '
+            'SELECT flight_id, icao, call, phase, points, start_time, end_time, duration_seconds, '
             'start_longitude_deg, start_latitude_deg, end_longitude_deg, end_latitude_deg, '
             'span_km, start_altitude_m, end_altitude_m FROM segments '
             'ORDER BY icao, call, start_time, segment_id'

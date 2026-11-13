@@ -1,6 +1,7 @@
 """test_web_history_view.py | 2026-11-09 | 历史参数、刷新约束及分组全点统计 | Codex."""
 import json
 from pathlib import Path
+import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -11,6 +12,7 @@ import pandas as pd
 from src.app.module_catalog import artifact_module_directory
 from src.web_console.web_util import ModuleHistoryUtil
 from src.web_console.group_view import group_result
+from src.web_console.segment_view import segment_result
 from tests import test_web_console as webtests
 
 
@@ -47,6 +49,43 @@ def group_fixture(root: Path) -> Path:
 
 
 class WebHistoryViewTests(unittest.TestCase):
+    def test_running_segment_exposes_parent_committed_progress_only(self) -> None:
+        """运行中的阶段表从暂存目录 SQLite 读取，供 AJAX 安全轮询。"""
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            pending = root / 'data/2_segment/fixture/.1#20261112_160000#42.pending'
+            data = pending / 'data'; data.mkdir(parents=True)
+            (pending / 'resolved_config.json').write_text(json.dumps({
+                'module_name': 'segment', 'dataset_id': 'fixture', 'dataset_name': 'fixture',
+                'run_id': '1', 'run_timestamp': '20261112_160000', 'global': {'seed': 42}, 'module': {},
+            }), encoding='utf-8')
+            database = sqlite3.connect(data / 'segment_progress.sqlite')
+            try:
+                database.execute('''CREATE TABLE segments (
+                    segment_id TEXT PRIMARY KEY, flight_id TEXT, icao TEXT, call TEXT, phase TEXT, points INTEGER,
+                    start_time TEXT, end_time TEXT, duration_seconds REAL, start_longitude_deg REAL,
+                    start_latitude_deg REAL, end_longitude_deg REAL, end_latitude_deg REAL, span_km REAL,
+                    start_altitude_m REAL, end_altitude_m REAL)''')
+                database.executemany('INSERT INTO segments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [
+                    ('f1:1', 'f1', 'ABC001', 'CAF001', 'CR', 8, '2024-01-01T00:01:00+00:00',
+                     '2024-01-01T00:02:00+00:00', 60.0, 120.1, 30.1, 120.2, 30.2, 14.7, 1100.0, 1200.0),
+                    ('f2:0', 'f2', 'ABC001', 'CAF001', 'CL', 8, '2024-01-01T00:00:00+00:00',
+                     '2024-01-01T00:01:00+00:00', 60.0, 120.0, 30.0, 120.1, 30.1, 14.7, 1000.0, 1100.0),
+                    ('f3:0', 'f3', 'ZZZ001', 'ZZZ001', 'DE', 8, '2024-01-01T00:00:00+00:00',
+                     '2024-01-01T00:01:00+00:00', 60.0, 120.0, 30.0, 120.1, 30.1, 14.7, 1000.0, 1100.0),
+                ])
+                database.commit()
+            finally:
+                database.close()
+            value = segment_result(root, pending.relative_to(root).as_posix())
+            self.assertTrue(value['available'])
+            self.assertEqual([(row['icao'], row['call'], row['start_time']) for row in value['rows']], [
+                ('ABC001', 'CAF001', '2024-01-01T00:00:00+00:00'),
+                ('ABC001', 'CAF001', '2024-01-01T00:01:00+00:00'),
+                ('ZZZ001', 'ZZZ001', '2024-01-01T00:00:00+00:00'),
+            ])
+            self.assertEqual(value['rows'][0]['span_km'], 14.7)
+
     def test_saved_parameters_and_current_command_defaults_are_separate(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
