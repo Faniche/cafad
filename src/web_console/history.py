@@ -61,11 +61,6 @@ def delete_history_run(project_root: Path, module_name: str, artifact: str) -> l
     return deleted
 
 
-def dependent_directories(project_root: Path, run_dir: Path) -> list[Path]:
-    """返回某次运行及其显式依赖它的下游运行，供修改源产物前检查。"""
-    return _dependent_directories(project_root, run_dir)
-
-
 def _module_root(project_root: Path, module_name: str) -> Path:
     """返回并约束某个正式模块的磁盘产物根。"""
     if module_name not in MODULE_SEQUENCE:

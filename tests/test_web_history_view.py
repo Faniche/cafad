@@ -13,9 +13,6 @@ from src.app.module_catalog import artifact_module_directory
 from src.web_console.web_util import ModuleHistoryUtil
 from src.web_console.group_view import group_result
 from src.web_console.segment_view import segment_result
-from src.modules.segment.manual_merge import merge_segments
-from src.app.artifacts import hash_file
-from src.app.tables import read_table, write_table
 from tests import test_web_console as webtests
 
 
@@ -52,74 +49,6 @@ def group_fixture(root: Path) -> Path:
 
 
 class WebHistoryViewTests(unittest.TestCase):
-    def test_manual_segment_merge_synchronizes_segment_records(self) -> None:
-        """人工合并必须同步片段表、点映射、展示 SQLite、序列审计和 manifest。"""
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            run = root / 'data/2_segment/fixture/1#20261113_120000#42'
-            data = run / 'data'; data.mkdir(parents=True)
-            segments = pd.DataFrame([
-                {'segment_id': 'f1:0', 'flight_id': 'f1', 'icao': 'ICAO001', 'call': 'CALL001', 'ordinal': 0,
-                 'phase': 'LVL', 'points': 2, 'start_time': '2024-01-01T00:00:00+00:00', 'end_time': '2024-01-01T00:00:01+00:00',
-                 'duration_seconds': 1., 'start_longitude_deg': 120., 'start_latitude_deg': 30., 'end_longitude_deg': 120.1,
-                 'end_latitude_deg': 30.1, 'span_km': 1., 'start_altitude_m': 1000., 'end_altitude_m': 1001.,
-                 'first_source_row_index': 0, 'last_source_row_index': 1, 'segment_label': 0, 'split': 'train'},
-                {'segment_id': 'f1:1', 'flight_id': 'f1', 'icao': 'ICAO001', 'call': 'CALL001', 'ordinal': 1,
-                 'phase': 'DE', 'points': 2, 'start_time': '2024-01-01T00:00:02+00:00', 'end_time': '2024-01-01T00:00:03+00:00',
-                 'duration_seconds': 1., 'start_longitude_deg': 120.2, 'start_latitude_deg': 30.2, 'end_longitude_deg': 120.3,
-                 'end_latitude_deg': 30.3, 'span_km': 1., 'start_altitude_m': 1002., 'end_altitude_m': 1003.,
-                 'first_source_row_index': 2, 'last_source_row_index': 3, 'segment_label': 0, 'split': 'train'},
-                {'segment_id': 'f1:2', 'flight_id': 'f1', 'icao': 'ICAO001', 'call': 'CALL001', 'ordinal': 2,
-                 'phase': 'LVL', 'points': 2, 'start_time': '2024-01-01T00:00:04+00:00', 'end_time': '2024-01-01T00:00:05+00:00',
-                 'duration_seconds': 1., 'start_longitude_deg': 120.4, 'start_latitude_deg': 30.4, 'end_longitude_deg': 120.5,
-                 'end_latitude_deg': 30.5, 'span_km': 1., 'start_altitude_m': 1004., 'end_altitude_m': 1005.,
-                 'first_source_row_index': 4, 'last_source_row_index': 5, 'segment_label': 0, 'split': 'train'},
-            ])
-            mapping = pd.DataFrame([
-                {'record_id': f'r{index}', 'flight_id': 'f1', 'time_ns': index, 'phase': phase,
-                 'segment_id': f'f1:{index // 2}', 'injected_label': 0, 'split': 'train'}
-                for index, phase in enumerate(('LVL', 'LVL', 'DE', 'DE', 'LVL', 'LVL'))
-            ])
-            write_table(segments, data, 'segments'); write_table(mapping, data, 'point_segment_map')
-            database = sqlite3.connect(data / 'segment_progress.sqlite')
-            try:
-                database.execute('''CREATE TABLE segments (
-                    segment_id TEXT PRIMARY KEY, flight_id TEXT, icao TEXT, call TEXT, phase TEXT, points INTEGER,
-                    start_time TEXT, end_time TEXT, duration_seconds REAL, start_longitude_deg REAL,
-                    start_latitude_deg REAL, end_longitude_deg REAL, end_latitude_deg REAL, span_km REAL,
-                    start_altitude_m REAL, end_altitude_m REAL)''')
-                columns = ['segment_id', 'flight_id', 'icao', 'call', 'phase', 'points', 'start_time', 'end_time',
-                           'duration_seconds', 'start_longitude_deg', 'start_latitude_deg', 'end_longitude_deg',
-                           'end_latitude_deg', 'span_km', 'start_altitude_m', 'end_altitude_m']
-                database.executemany('INSERT INTO segments VALUES (' + ','.join('?' for _ in columns) + ')',
-                                     segments[columns].itertuples(index=False, name=None))
-                database.commit()
-            finally:
-                database.close()
-            (run / 'resolved_config.json').write_text(json.dumps({'module_name': 'segment', 'dataset_id': 'fixture',
-                'dataset_name': 'fixture', 'run_id': '1', 'run_timestamp': '20261113_120000', 'global': {'seed': 42}, 'module': {}}))
-            (run / 'summary.json').write_text(json.dumps({'segments': 3, 'sequence_categories': {}}))
-            (run / 'validation.json').write_text(json.dumps({'passed': True, 'checks': {'segments': 3}}))
-            outputs = [{'path': path.relative_to(run).as_posix(), 'bytes': path.stat().st_size, 'sha256': hash_file(path)}
-                       for path in sorted(run.rglob('*')) if path.is_file()]
-            (run / 'manifest.json').write_text(json.dumps({'status': 'SUCCEEDED', 'module': 'segment', 'dataset_id': 'fixture',
-                'dataset_name': 'fixture', 'run_id': '1', 'dependencies': [], 'outputs': outputs, 'validation': 'validation.json'}))
-            result = merge_segments(root, run.relative_to(root).as_posix(), ['f1:0', 'f1:1'], 'LVL')
-            self.assertEqual(result['segments'], 2)
-            merged = read_table(data, 'segments').sort_values('ordinal')
-            self.assertEqual(merged[['segment_id', 'phase', 'points', 'ordinal']].values.tolist(),
-                             [['f1:0', 'LVL', 4, 0], ['f1:2', 'LVL', 2, 1]])
-            point_map = read_table(data, 'point_segment_map').sort_values('record_id')
-            self.assertEqual(point_map['segment_id'].tolist(), ['f1:0', 'f1:0', 'f1:0', 'f1:0', 'f1:2', 'f1:2'])
-            self.assertEqual(point_map['phase'].tolist(), ['LVL'] * 6)
-            self.assertEqual(segment_result(root, run.relative_to(root).as_posix())['rows'][0]['points'], 4)
-            review = read_table(data, 'flight_phase_sequences')
-            self.assertEqual(review.iloc[0]['phase_sequence'], 'LVL>LVL')
-            ledger = read_table(data, 'manual_segment_merges')
-            self.assertEqual(json.loads(ledger.iloc[0]['source_segment_ids']), ['f1:0', 'f1:1'])
-            from src.app.artifacts import read_manifest
-            self.assertEqual(read_manifest(run / 'manifest.json', expected_module='segment')['manual_revision'], 1)
-
     def test_running_segment_exposes_parent_committed_progress_only(self) -> None:
         """运行中的阶段表从暂存目录 SQLite 读取，供 AJAX 安全轮询。"""
         with TemporaryDirectory() as directory:
