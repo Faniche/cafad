@@ -66,6 +66,8 @@ input:focus, select:focus { outline: 2px solid #38bdf8; outline-offset: 1px; }
 .history-table { width: 100%; margin-top: 14px; border-collapse: collapse; }
 .history-table th, .history-table td { padding: 8px; border: 1px solid #334155; text-align: left; overflow-wrap: anywhere; }
 .history-table button { padding: 6px 10px; }
+#segment-result tr.segment-flight-even td { background: #172033; }
+#segment-result tr.segment-flight-odd td { background: #1b2a3d; }
 #history-detail { margin-top: 20px; }
 #history-detail h4 { margin: 18px 0 8px; }
 .history-text { max-height: 360px; margin: 0; overflow: auto; padding: 12px; background: #020617; color: #d1fae5; font: .82rem/1.48 ui-monospace, Consolas, monospace; white-space: pre-wrap; }

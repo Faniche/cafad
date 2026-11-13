@@ -5,12 +5,18 @@ function renderSegmentResult(container, data) {
   const head = table.createTHead().insertRow(); labels.forEach((label) => { const cell = document.createElement('th'); cell.textContent = label; head.append(cell); });
   const body = table.createTBody();
   const number = (value, digits = 3) => value == null ? '' : Number(value).toFixed(digits);
+  let previousFlight = null;
+  let flightBlock = -1;
   (data.rows || []).forEach((row) => {
+    const flight = `${row.icao ?? ''}\u0000${row.call ?? ''}`;
+    if (flight !== previousFlight) { flightBlock += 1; previousFlight = flight; }
     const cells = [row.icao, row.call, row.phase, row.points, row.start_time, row.end_time,
       number(row.duration_seconds), `${number(row.start_longitude_deg, 5)}, ${number(row.start_latitude_deg, 5)}`,
       `${number(row.end_longitude_deg, 5)}, ${number(row.end_latitude_deg, 5)}`,
       number(row.span_km), number(row.start_altitude_m), number(row.end_altitude_m)];
-    const line = body.insertRow(); cells.forEach((value) => { line.insertCell().textContent = String(value ?? ''); });
+    const line = body.insertRow();
+    line.className = flightBlock % 2 === 0 ? 'segment-flight-even' : 'segment-flight-odd';
+    cells.forEach((value) => { line.insertCell().textContent = String(value ?? ''); });
   });
   const note = document.createElement('p'); note.className = 'inline-note';
   note.textContent = data.available ? `已提交 ${data.rows.length} 个阶段片段；运行中每秒刷新。` : '尚未有已完成航班。';
