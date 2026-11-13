@@ -5,10 +5,10 @@ import logging
 import pandas as pd
 from src.app.artifacts import read_manifest
 from src.app.tables import read_table
-from src.modules.group.api import _read_segment_store
+from src.modules.group.api import _read_segment_store, read_segment_store_data
 from src.modules.group.features import (FEATURE_NAMES, build_segment_features, centroids_by_group,
                                         feature_scaler_from_dict, transform_features)
-from src.modules.train.api import _segment_manifest, _load_sequences, _devices
+from src.modules.train.api import _group_manifest, _segment_manifest, _load_sequences, _load_sequences_from_data, _devices
 from .scoring import score_pairs
 from .fusion import fuse_candidates, fallback_score
 
@@ -23,28 +23,10 @@ def upstream(path: Path, module: str) -> Path:
     return matches[0]
 
 
-def score_partition(trained: Path, split: str, top_r: int, temperature: float, gpus: str,
-                    logger: logging.Logger, workers: int = 1, task_size: int = 32) -> tuple[pd.DataFrame, pd.DataFrame, Path]:
-    """前向只读观测、ID、阶段和分区，绝不读取目标标签；按专家加载以限制显存。"""
-    read_manifest(trained, expected_module='train')
-    grouped = upstream(trained, 'group')
-    segmented = _segment_manifest(grouped)
-    metadata = read_table(segmented.parent / 'data', 'segments',
-                          columns=['segment_id', 'flight_id', 'phase', 'split'], keep_default_na=False)
-    targets = metadata.loc[metadata['split'].eq(split)].copy()
-    if targets.empty:
-        raise ValueError(f'{split} 分区没有片段')
-    sequences, _ = _load_sequences(segmented)
-    routing = read_table(grouped.parent / 'data', 'routing_segments', keep_default_na=False)
-    groups = read_table(grouped.parent / 'data', 'groups', keep_default_na=False)
-    segment_rows, values = _read_segment_store(segmented)
-    scaler = feature_scaler_from_dict(json.loads((grouped.parent / 'data/feature_scaler.json').read_text(encoding='utf-8')))
-    features = build_segment_features(segment_rows, values, scaler.time_origin_ns)
-    vectors = transform_features(features, scaler)
-    vectors.insert(0, 'segment_id', features['segment_id'].astype(str))
-    vectors_by_segment = vectors.set_index('segment_id', verify_integrity=True)
-    centers = centroids_by_group(routing, vectors_by_segment)
-    pairs = []
+def _routing_pairs(targets: pd.DataFrame, groups: pd.DataFrame, centers: dict[str, object],
+                   vectors_by_segment: pd.DataFrame, top_r: int) -> pd.DataFrame:
+    """以冻结组中心为目标片段生成同阶段 top-r 候选；标签不参与路由。"""
+    pairs: list[dict[str, object]] = []
     for row in targets.itertuples(index=False):
         same = groups.loc[groups['phase'].eq(row.phase), 'group_id'].tolist()
         fallback = not same
@@ -56,7 +38,41 @@ def score_partition(trained: Path, split: str, top_r: int, temperature: float, g
             selected = selected[:top_r]
         pairs.extend({'segment_id': row.segment_id, 'group_id': group, 'distance': distance,
                       'route_mode': 'fallback' if fallback else 'same_phase'} for group, distance in selected)
-    scores = pd.DataFrame(pairs)
+    return pd.DataFrame(pairs)
+
+
+def score_partition(trained: Path, split: str, top_r: int, temperature: float, gpus: str,
+                    logger: logging.Logger, workers: int = 1, task_size: int = 32,
+                    target_data: Path | None = None) -> tuple[pd.DataFrame, pd.DataFrame, Path]:
+    """用注入后的目标序列评分；验证沿用干净边界，测试由 detect 传入动态分段结果。"""
+    read_manifest(trained, expected_module='train')
+    injected = upstream(trained, 'inject')
+    grouped = _group_manifest(injected)
+    segmented = _segment_manifest(grouped)
+    source_data = target_data or injected.parent / 'data'
+    metadata = read_table(source_data, 'segments', columns=['segment_id', 'flight_id', 'phase', 'split', 'segment_label'],
+                          keep_default_na=False)
+    targets = metadata.loc[metadata['split'].eq(split)].copy()
+    if targets.empty:
+        raise ValueError(f'{split} 分区没有片段')
+    sequences, _ = (_load_sequences_from_data(source_data) if target_data is not None
+                    else _load_sequences(segmented, injected))
+    routing = read_table(grouped.parent / 'data', 'routing_segments', keep_default_na=False)
+    groups = read_table(grouped.parent / 'data', 'groups', keep_default_na=False)
+    clean_rows, clean_values = _read_segment_store(segmented)
+    scaler = feature_scaler_from_dict(json.loads((grouped.parent / 'data/feature_scaler.json').read_text(encoding='utf-8')))
+    clean_features = build_segment_features(clean_rows, clean_values, scaler.time_origin_ns)
+    features = clean_features
+    if target_data is not None:
+        target_rows, target_values = read_segment_store_data(target_data)
+        features = build_segment_features(target_rows, target_values, scaler.time_origin_ns)
+    vectors = transform_features(features, scaler)
+    vectors.insert(0, 'segment_id', features['segment_id'].astype(str))
+    vectors_by_segment = vectors.set_index('segment_id', verify_integrity=True)
+    clean_vectors = transform_features(clean_features, scaler)
+    clean_vectors.insert(0, 'segment_id', clean_features['segment_id'].astype(str))
+    centers = centroids_by_group(routing, clean_vectors.set_index('segment_id', verify_integrity=True))
+    scores = _routing_pairs(targets, groups, centers, vectors_by_segment, top_r)
     scores = score_pairs(scores, sequences, trained, _devices(gpus), workers, task_size, logger)
     fused = []
     for key, frame in scores.groupby('segment_id', sort=False):
