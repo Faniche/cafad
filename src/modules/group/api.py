@@ -1,4 +1,4 @@
-"""api.py | 2026-11-09 | 训练正常片段 HDBSCAN 分组及训练路由 | Codex."""
+"""api.py | 2026-11-13 | 干净训练片段 HDBSCAN 分组及冻结路由 | Codex."""
 from __future__ import annotations
 
 import argparse
@@ -49,7 +49,7 @@ class HdbscanCandidate:
 
 def build_parser() -> argparse.ArgumentParser:
     """定义训练正常片段 HDBSCAN 建组与自动候选选择参数。"""
-    parser = ProjectArgumentParser(prog='main.py -m group', description='仅以训练正常阶段片段拟合 HDBSCAN 正常参考组。')
+    parser = ProjectArgumentParser(prog='main.py -m group', description='仅以计划正常的干净训练片段拟合 HDBSCAN 正常参考组。')
     parser.add_argument('--input', required=True, type=Path, help='segment 模块已发布的 manifest.json')
     for _, destination, help_text in FEATURE_WEIGHT_ARGUMENTS:
         parser.add_argument('--' + destination.replace('_', '-'), dest=destination, type=float, default=1.0,
@@ -71,11 +71,9 @@ def _project_path(context: RunContext, value: Path) -> Path:
     return value if value.is_absolute() else context.project_root / value
 
 
-def _read_segment_store(path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """读取已验收 S0，按稳定 record_id 合并六维观测。"""
-    manifest = read_manifest(path, expected_module='segment')
-    data_dir = path.parent / 'data'
-    required_segments = {'segment_id', 'flight_id', 'phase', 'ordinal', 'segment_label', 'split'}
+def read_segment_store_data(data_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """读取一份阶段边界与观测表，按稳定 record_id 合并六维观测。"""
+    required_segments = {'segment_id', 'flight_id', 'phase', 'ordinal', 'segment_label', 'split', 'injection_plan'}
     required_points = {'segment_id', 'record_id', 'flight_id', 'time_ns'}
     required_observations = {'record_id', 'time_ns', 'longitude_deg', 'latitude_deg', 'geometric_altitude_m',
                              'barometric_altitude_m', 'heading_deg', 'speed_mps'}
@@ -92,9 +90,17 @@ def _read_segment_store(path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
                           how='left', validate='one_to_one')
     if values[['longitude_deg', 'latitude_deg', 'geometric_altitude_m', 'barometric_altitude_m', 'heading_deg', 'speed_mps']].isna().any().any() or values['record_id'].duplicated().any():
         raise ValueError('片段记录无法与最终观测一一对应')
-    if manifest.get('dataset_id') is None or segments['segment_id'].duplicated().any():
-        raise ValueError('segment 清单或片段 ID 无效')
+    if segments['segment_id'].duplicated().any():
+        raise ValueError('阶段片段 ID 无效')
     return segments, values
+
+
+def _read_segment_store(path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """读取已验收正式 segment 产物。"""
+    manifest = read_manifest(path, expected_module='segment')
+    if manifest.get('dataset_id') is None:
+        raise ValueError('segment 清单数据集身份无效')
+    return read_segment_store_data(path.parent / 'data')
 
 
 def _candidate_pairs(args: argparse.Namespace) -> tuple[tuple[int, int], ...]:
@@ -281,21 +287,19 @@ def _nearest_group(segment_id: str, phase: str, phase_by_group: dict[str, str],
 
 def _route_training_targets(segments: pd.DataFrame, core: pd.DataFrame, vectors_by_segment: pd.DataFrame,
                             normal_assignments: dict[str, str]) -> pd.DataFrame:
-    """正常沿用唯一簇；异常以注入后特征向量到冻结组中心的距离路由。"""
+    """在注入前以干净片段冻结训练路由；成员保留唯一簇，其他片段取最近同阶段组。"""
     phase_by_group = {str(rows['group_id'].iloc[0]): str(rows['phase'].iloc[0])
                       for _, rows in core.groupby('group_id', sort=False, observed=True)}
     centers = centroids_by_group(core, vectors_by_segment)
     assignments: list[dict[str, object]] = []
     for row in segments.loc[segments['split'].eq('train')].itertuples(index=False):
         segment_id = str(row.segment_id)
-        if int(row.segment_label) == 0:
-            group_id = normal_assignments.get(segment_id)
-            if group_id is None:
-                continue
+        group_id = normal_assignments.get(segment_id)
+        if group_id is not None:
             assignments.append(_assignment_row(row, group_id, 0.0, 'normal_cluster'))
             continue
         group_id, distance, scope = _nearest_group(segment_id, str(row.phase), phase_by_group, centers, vectors_by_segment)
-        assignments.append(_assignment_row(row, group_id, distance, f'abnormal_nearest_{scope}'))
+        assignments.append(_assignment_row(row, group_id, distance, f'clean_nearest_{scope}'))
     return pd.DataFrame(assignments, columns=ASSIGNMENT_COLUMNS)
 
 
@@ -319,7 +323,7 @@ def _assignment_row(row: object, group_id: str, distance: float, mode: str) -> d
 
 
 def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
-    """以训练正常片段固定 HDBSCAN 组结构，并为所有训练目标生成唯一专家归属。"""
+    """以计划正常的干净训练片段固定组结构，并为未来注入前的目标保留唯一归属。"""
     if (not args.min_cluster_sizes or min(args.min_cluster_sizes) < 2 or
             not args.min_samples_values or min(args.min_samples_values) < 1 or args.min_group_members < 2 or
             not 0 < args.max_group_fraction <= 1 or
@@ -328,13 +332,13 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
     input_manifest = _project_path(context, args.input).resolve()
     segments, values = _read_segment_store(input_manifest)
     recognized = segments.loc[~segments['phase'].eq('NA')].copy()
-    normal = recognized.loc[recognized['split'].eq('train') & recognized['segment_label'].eq(0)].copy()
+    normal = recognized.loc[recognized['split'].eq('train') & recognized['injection_plan'].eq('normal')].copy()
     if normal.empty:
         raise ValueError('没有可用于建立正常训练分组的非 NA 片段')
     segments_per_normal_flight = normal.groupby('flight_id', observed=True).size()
     minimum_effective_groups = int(segments_per_normal_flight.max())
     longest_normal_flight = str(segments_per_normal_flight.idxmax())
-    context.logger.debug('分组输入读取完成：segments=%d；observations=%d；recognized=%d；normal_train=%d；phases=%s',
+    context.logger.debug('分组输入读取完成：segments=%d；observations=%d；recognized=%d；planned_normal_train=%d；phases=%s',
                          len(segments), len(values), len(recognized), len(normal),
                          normal.groupby('phase', observed=True).size().to_dict())
     time_origin_ns = int(values['time_ns'].min())
@@ -346,7 +350,7 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
     transformed.insert(0, 'segment_id', features['segment_id'].astype(str))
     vectors_by_segment = transformed.set_index('segment_id', verify_integrity=True)
     candidates = _candidate_pairs(args)
-    context.logger.info('开始对训练集正常片段进行 HDBSCAN 建组：normal=%d；recognized=%d；features=%d；candidates=%s；min_group_members=%d；max_group_fraction=%g；最长正常航班=%s；组数下限=%d',
+    context.logger.info('开始对计划正常的干净训练片段进行 HDBSCAN 建组：normal=%d；recognized=%d；features=%d；candidates=%s；min_group_members=%d；max_group_fraction=%g；最长正常航班=%s；组数下限=%d',
                         len(normal), len(recognized), len(FEATURE_NAMES), candidates, args.min_group_members, args.max_group_fraction,
                         longest_normal_flight, minimum_effective_groups)
     groups, core, references, normal_assignments, exclusions, selection = _fit_groups(
@@ -381,9 +385,9 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
                'recognized_segments': int(len(recognized)), 'effective_groups': int(len(groups)), 'routing_segments': int(len(core)),
                'minimum_effective_groups': minimum_effective_groups, 'longest_normal_training_flight': longest_normal_flight,
                'reference_segments': int(len(references)), 'train_targets': int(len(assignments)),
-               'abnormal_train_targets': int(assignments['segment_label'].sum()), 'validation_targets': int(len(validation_assignments)),
+               'abnormal_train_targets': 0, 'validation_targets': int(len(validation_assignments)),
                'excluded_normal_segments': int(len(exclusions))}
-    context.logger.info('分组完成：有效组=%d（下限=%d）；参考=%d；正常覆盖率=%.2f%%；训练目标=%d（异常=%d）；排除正常=%d',
+    context.logger.info('分组完成：有效组=%d（下限=%d）；参考=%d；正常覆盖率=%.2f%%；训练目标=%d（注入前异常=%d）；排除正常=%d',
                         summary['effective_groups'], summary['minimum_effective_groups'], summary['reference_segments'], normal_coverage * 100,
                         summary['train_targets'], summary['abnormal_train_targets'], summary['excluded_normal_segments'])
     return ModuleResult(summary=summary, dependencies=(input_manifest,))
