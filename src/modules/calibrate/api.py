@@ -26,10 +26,8 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
     if args.top_r < 1 or not np.isfinite(args.temperature) or args.temperature <= 0:
         raise ValueError('top-r 必须为正整数，temperature 必须为有限正数')
     trained = (context.project_root / args.input).resolve()
-    scores, pairs, segmented = score_partition(trained, 'val', args.top_r, args.temperature, args.gpus,
-                                              context.logger, context.workers, args.score_task_size)
-    labels = read_table(segmented.parent / 'data', 'segments', columns=['segment_id', 'segment_label'])
-    scores = scores.merge(labels, on='segment_id', validate='one_to_one')
+    scores, pairs, _ = score_partition(trained, 'val', args.top_r, args.temperature, args.gpus,
+                                        context.logger, context.workers, args.score_task_size)
     threshold, scan = select_segment_threshold(scores['score'].to_numpy(), scores['segment_label'].to_numpy())
     data = context.staging_dir / 'data'; data.mkdir()
     write_table(scores, data, 'val_scores')
