@@ -8,9 +8,8 @@ from src.app.arguments import ProjectArgumentParser
 from src.app.artifacts import read_manifest, write_json
 from src.app.contracts import RunContext, ModuleResult, ValidationReport
 from src.app.tables import read_table, write_table
-from src.modules.detect.inference import upstream
 from src.modules.detect.fusion import make_predictions
-from .metrics import binary_metrics, align_segments
+from .metrics import binary_metrics
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -20,22 +19,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def read_evaluation(detected: Path) -> tuple[pd.DataFrame, pd.DataFrame, str]:
+    """直接消费 detect 已保存的动态测试片段与标签，不回读训练期干净片段。"""
     read_manifest(detected, expected_module='detect')
-    calibrated = upstream(detected, 'calibrate')
-    trained = upstream(calibrated, 'train')
-    grouped = upstream(trained, 'group')
-    segmented = upstream(grouped, 'segment')
+    calibrated = next(Path(item['manifest']) for item in read_manifest(detected)['dependencies']
+                      if read_manifest(Path(item['manifest'])).get('module') == 'calibrate')
     config = json.loads((detected.parent / 'resolved_config.json').read_text(encoding='utf-8'))
     split = config['module']['split']
     if split not in ('val', 'test'):
         raise ValueError('评价分区必须为 val 或 test')
-    truth = read_table(segmented.parent / 'data', 'segments', keep_default_na=False,
-                       dtype={'segment_id': str, 'flight_id': str},
-                       columns=['segment_id', 'flight_id', 'phase', 'split', 'segment_label'])
-    truth = truth.loc[truth.split.eq(split)]
     predictions = read_table(detected.parent / 'data', 'segment_predictions', keep_default_na=False,
                              dtype={'segment_id': str, 'flight_id': str})
-    joined = align_segments(predictions, truth)
+    required = {'segment_id', 'flight_id', 'phase', 'split', 'segment_label', 'score', 'prediction'}
+    if predictions.empty or predictions['segment_id'].duplicated().any() or not required.issubset(predictions.columns):
+        raise ValueError('detect 片段预测缺少动态测试标签或关键字段')
+    joined = predictions
     bundle = json.loads((calibrated.parent / 'system_bundle.json').read_text(encoding='utf-8'))
     expected, flights = make_predictions(joined, bundle['threshold'])
     if not expected.prediction.equals(joined.prediction):
@@ -46,14 +43,14 @@ def read_evaluation(detected: Path) -> tuple[pd.DataFrame, pd.DataFrame, str]:
     check = flights.merge(saved_flights, on='flight_id', validate='one_to_one', suffixes=('', '_saved'))
     if not np.array_equal(check.prediction, check.prediction_saved) or not np.allclose(check.score, check.score_saved):
         raise ValueError('保存的航班预测不符合片段 OR')
-    flight_truth = truth.groupby('flight_id').segment_label.max().rename('label').reset_index()
+    flight_truth = joined.groupby('flight_id').segment_label.max().rename('label').reset_index()
     return joined, flights.merge(flight_truth, on='flight_id', validate='one_to_one'), split
 
 
 def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
     detected = (context.project_root / args.input).resolve()
     segments, flights, split = read_evaluation(detected)
-    metrics = {'split': split, 'scope': 'segment 模块已产出的完整分区；不含此前无法识别的航班',
+    metrics = {'split': split, 'scope': 'detect 动态分段后成功识别的完整测试集；不含该次无法识别的航班',
                'segment': binary_metrics(segments.segment_label.to_numpy(), segments.prediction.to_numpy()),
                'trajectory': binary_metrics(flights.label.to_numpy(), flights.prediction.to_numpy())}
     data = context.staging_dir / 'data'; data.mkdir()
