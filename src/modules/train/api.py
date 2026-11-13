@@ -24,9 +24,9 @@ from .timing import StageTimer, dominant_timing, format_timing
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """定义启动期小模型训练参数；输入只接受直接上游 group 清单。"""
+    """定义启动期小模型训练参数；输入只接受直接上游 inject 清单。"""
     parser = ProjectArgumentParser(prog='main.py -m train', description='训练每个正常参考组对应的独立双分支记忆专家。')
-    parser.add_argument('--input', required=True, type=Path, help='group 模块已发布的 manifest.json')
+    parser.add_argument('--input', required=True, type=Path, help='inject 模块已发布的 manifest.json')
     parser.add_argument('--gpus', default='0,1,2,3', help='逗号分隔的 CUDA 设备号；故障时终止，不自动回退；仅显式 cpu 使用CPU')
     parser.add_argument('--d-model', type=int, default=64)
     parser.add_argument('--branch-layers', type=int, default=2)
@@ -70,21 +70,39 @@ def _segment_manifest(group_manifest: Path) -> Path:
     return matches[0]
 
 
-def _load_sequences(segment_manifest: Path) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
-    """由 S0 读取变长最终片段；模型从不读取干净副本或注入事件位置。"""
-    data = segment_manifest.parent / 'data'
+def _group_manifest(inject_manifest: Path) -> Path:
+    """从直接 inject 输入恢复冻结的干净 group 产物。"""
+    injected = read_manifest(inject_manifest, expected_module='inject')
+    matches = [Path(item['manifest']) for item in injected.get('dependencies', [])
+               if read_manifest(Path(item['manifest'])).get('module') == 'group']
+    if len(matches) != 1:
+        raise ValueError('inject 清单无法唯一溯源 group 输入')
+    return matches[0]
+
+
+def _load_sequences_from_data(data: Path, mapping_data: Path | None = None) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
+    """以指定观测／映射表构造模型序列；用于冻结边界和测试时动态边界两种场景。"""
+    mapping_data = mapping_data or data
     columns = ['record_id', 'time_ns', 'longitude_deg', 'latitude_deg', 'geometric_altitude_m', 'barometric_altitude_m', 'heading_deg', 'speed_mps']
-    points = read_table(data, 'point_segment_map', columns=['segment_id', 'record_id'],
+    points = read_table(mapping_data, 'point_segment_map', columns=['segment_id', 'record_id'],
                         dtype={'segment_id': 'string', 'record_id': 'string'})
-    observations = read_table(data, 'input_observations', columns=columns, dtype={'record_id': 'string'})
+    observation_name = 'input_observations' if (data / 'input_observations.parquet').is_file() else 'observations'
+    observations = read_table(data, observation_name, columns=columns, dtype={'record_id': 'string'})
     values = points[['segment_id', 'record_id']].merge(observations[columns], on='record_id', how='left', validate='one_to_one')
     if values.isna().any().any() or values['segment_id'].isna().any():
         raise ValueError('训练片段无法与最终观测完整对齐')
     sequences = {str(segment_id): frame.sort_values('time_ns', kind='stable').reset_index(drop=True)
                  for segment_id, frame in values.groupby('segment_id', sort=False, observed=True)}
-    metadata = read_table(data, 'segments', columns=['segment_id', 'flight_id'],
+    metadata = read_table(mapping_data, 'segments', columns=['segment_id', 'flight_id'],
                           dtype={'segment_id': 'string', 'flight_id': 'string'})
     return sequences, metadata
+
+
+def _load_sequences(segment_manifest: Path, observation_manifest: Path | None = None) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
+    """以干净阶段边界读取注入后的变长序列；未给注入产物时回退到 segment 自身。"""
+    data = observation_manifest.parent / 'data' if observation_manifest is not None else segment_manifest.parent / 'data'
+    mapping_data = data if (data / 'point_segment_map.parquet').is_file() else segment_manifest.parent / 'data'
+    return _load_sequences_from_data(data, mapping_data)
 
 
 def _stats(reference_ids: list[str], sequences: dict[str, pd.DataFrame]) -> dict[str, list[float]]:
@@ -139,6 +157,14 @@ def _seed(*parts: object) -> int:
     return int.from_bytes(hashlib.sha256('|'.join(str(part) for part in parts).encode()).digest()[:8], 'big')
 
 
+def _loss_function(targets: pd.DataFrame, device: torch.device) -> tuple[nn.Module, float]:
+    """按专家训练目标自动平衡逐片段 BCE；两类齐全时异常类获得负正样本数比重。"""
+    positives = int(targets['segment_label'].sum())
+    negatives = int(len(targets) - positives)
+    weight = float(negatives / positives) if positives and negatives else 1.0
+    return nn.BCEWithLogitsLoss(pos_weight=torch.tensor(weight, dtype=torch.float32, device=device)), weight
+
+
 def _train_expert(group_id: str, expert_index: int, assignments: pd.DataFrame, validation: pd.DataFrame, references: pd.DataFrame,
                   sequences: dict[str, pd.DataFrame], args: argparse.Namespace, root_seed: int, output: Path,
                   logger: object, device: torch.device) -> dict[str, object]:
@@ -159,7 +185,12 @@ def _train_expert(group_id: str, expert_index: int, assignments: pd.DataFrame, v
     scaler = torch.amp.GradScaler('cuda', enabled=args.precision == 'fp16')
     logger.info('专家 %s 计算精度=%s；AMP=%s；梯度缩放=%s；参数与检查点保留FP32；device=%s',
                 group_id, args.precision, args.precision != 'fp32', scaler.is_enabled(), device)
-    loss_fn = nn.BCEWithLogitsLoss()
+    loss_fn, positive_weight = _loss_function(train, device)
+    positives = int(train['segment_label'].sum())
+    logger.info('专家 %s 训练标签：normal=%d；abnormal=%d；BCE pos_weight=%.6f',
+                group_id, len(train) - positives, positives, positive_weight)
+    if positives == 0 or positives == len(train):
+        logger.warning('专家 %s 当前没有同时覆盖正常与异常训练片段；保留该专家但其 BCE 无法学习双类边界', group_id)
     best_loss, stale, history, best_state = float('inf'), 0, [], None
     checkpoint_selection = 'validation_loss' if not validate.empty else 'training_loss_no_validation'
     if validate.empty:
@@ -249,6 +280,7 @@ def _train_expert(group_id: str, expert_index: int, assignments: pd.DataFrame, v
     logger.info('专家 %s 完成：device=%s；targets=%d；validation=%d；checkpoint_selection=%s；best_loss=%.6f',
                 group_id, device, len(train), len(validate), checkpoint_selection, best_loss)
     return {'group_id': group_id, 'expert_id': expert_index, 'targets': int(len(train)), 'validation_targets': int(len(validate)),
+            'normal_targets': int(len(train) - positives), 'abnormal_targets': positives, 'positive_weight': positive_weight,
             'best_checkpoint_loss': best_loss, 'checkpoint_selection': checkpoint_selection,
             'device': str(device), 'precision': args.precision, 'epochs': len(history)}
 
@@ -284,21 +316,38 @@ def _architecture(args: argparse.Namespace) -> dict[str, object]:
     return {name: getattr(args, name) for name in ('d_model', 'branch_layers', 'branch_heads', 'group_layers', 'group_heads', 'pool_heads', 'memory_slots', 'dropout')}
 
 
+def _with_injected_labels(assignments: pd.DataFrame, injected_segments: pd.DataFrame) -> pd.DataFrame:
+    """将冻结的 clean routing 与 inject 后逐点 OR 得到的片段标签按 stable segment_id 合并。"""
+    labels = injected_segments[['segment_id', 'segment_label']].copy()
+    labels['segment_id'] = labels['segment_id'].astype(str)
+    if labels['segment_id'].duplicated().any():
+        raise ValueError('inject 片段标签存在重复 segment_id')
+    merged = assignments.drop(columns=['segment_label']).merge(labels, on='segment_id', how='inner', validate='one_to_one')
+    if len(merged) != len(assignments) or merged['segment_label'].isna().any():
+        raise ValueError('冻结路由无法完整匹配 inject 后片段标签')
+    return merged.loc[:, list(assignments.columns)]
+
+
 def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
-    """读取直接 group 输入，每设备一个进程从共享池动态领取专家。"""
+    """读取直接 inject 输入，以冻结干净路由训练每个专家的正常／异常片段分类器。"""
     if min(args.micro_batch_size, args.d_model, args.branch_layers, args.branch_heads, args.group_layers, args.group_heads,
                                          args.pool_heads, args.memory_slots, args.ref_limit, args.batch_size, args.epochs, args.patience) < 1:
         raise ValueError('微批、有效批、网络层数、头数、epoch 与参考上限必须为正')
     if not 0 <= args.dropout < 1 or args.learning_rate <= 0 or args.weight_decay < 0 or args.grad_clip <= 0:
         raise ValueError('训练优化器参数无效')
-    group_manifest = _project_path(context, args.input).resolve()
-    read_manifest(group_manifest, expected_module='group')
+    inject_manifest = _project_path(context, args.input).resolve()
+    read_manifest(inject_manifest, expected_module='inject')
+    group_manifest = _group_manifest(inject_manifest)
     segment_manifest = _segment_manifest(group_manifest)
     group_data = group_manifest.parent / 'data'
     groups = read_table(group_data, 'groups', dtype={'group_id': 'string'})
     references = read_table(group_data, 'references', dtype={'group_id': 'string', 'segment_id': 'string', 'flight_id': 'string'})
     assignments = read_table(group_data, 'train_assignments', dtype={'group_id': 'string', 'segment_id': 'string', 'flight_id': 'string'})
     validation = read_table(group_data, 'validation_assignments', dtype={'group_id': 'string', 'segment_id': 'string', 'flight_id': 'string'})
+    injected_segments = read_table(inject_manifest.parent / 'data', 'segments',
+                                   dtype={'segment_id': 'string', 'flight_id': 'string'})
+    assignments = _with_injected_labels(assignments, injected_segments)
+    validation = _with_injected_labels(validation, injected_segments)
     devices = _devices(args.gpus)
     for device in devices:
         validate_precision(args.precision, device)
@@ -306,20 +355,23 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
     counts = assignments.groupby('group_id').size().to_dict()
     rows = sorted(groups.itertuples(index=False), key=lambda row: (-counts.get(row.group_id, 0), row.expert_id))
     model_dir = context.staging_dir / 'models'
-    context.logger.info('开始进程池训练：groups=%d；训练目标=%d；验证目标=%d；devices=%s；并发进程上限=%d',
-                        len(groups), len(assignments), len(validation), ','.join(str(item) for item in devices), len(devices))
+    context.logger.info('开始进程池训练：groups=%d；训练目标=%d（异常=%d）；验证目标=%d（异常=%d）；devices=%s；并发进程上限=%d',
+                        len(groups), len(assignments), int(assignments['segment_label'].sum()), len(validation),
+                        int(validation['segment_label'].sum()), ','.join(str(item) for item in devices), len(devices))
     context.logger.info('长度组批：micro_batch_size=%d；每次更新目标数=%d；动态padding+mask；尾批按实际目标数归一化',
                         args.micro_batch_size, args.batch_size)
     from .parallel import train_pool
     summaries = train_pool([(str(row.group_id), int(row.expert_id)) for row in rows], devices, group_manifest,
-                           segment_manifest, args, context.seed, model_dir, context.logger, context.workers)
+                           segment_manifest, inject_manifest, args, context.seed, model_dir, context.logger, context.workers)
     summaries.sort(key=lambda item: int(item['expert_id']))
     write_table(pd.DataFrame(summaries), context.staging_dir, 'expert_summary')
-    return ModuleResult(summary={'input_manifest': str(group_manifest), 'segment_manifest': str(segment_manifest),
+    return ModuleResult(summary={'input_manifest': str(inject_manifest), 'group_manifest': str(group_manifest), 'segment_manifest': str(segment_manifest),
                                  'experts': len(summaries), 'targets': int(len(assignments)), 'validation_targets': int(len(validation)),
+                                 'abnormal_targets': int(assignments['segment_label'].sum()),
+                                 'abnormal_validation_targets': int(validation['segment_label'].sum()),
                                  'ablation': args.ablation, 'precision': args.precision,
                                  'micro_batch_size': args.micro_batch_size, 'batch_size': args.batch_size,
-                                 'batching': 'length-sorted-shuffled-microbatches'}, dependencies=(group_manifest,))
+                                 'batching': 'length-sorted-shuffled-microbatches'}, dependencies=(inject_manifest,))
 
 
 def validate_outputs(context: RunContext, args: argparse.Namespace, result: ModuleResult) -> ValidationReport:

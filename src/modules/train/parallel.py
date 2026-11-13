@@ -31,10 +31,10 @@ class WorkerState:
 _state: WorkerState | None = None
 
 
-def initialize_worker(devices: object, logs: object, group_manifest: Path, segment_manifest: Path,
+def initialize_worker(devices: object, logs: object, group_manifest: Path, segment_manifest: Path, inject_manifest: Path,
                       args: argparse.Namespace, seed: int, output: Path, threads: int, level: int) -> None:
     """spawn 后绑定独占 GPU，限制 CPU 线程并把日志交回主进程。"""
-    from .api import _load_sequences
+    from .api import _load_sequences, _with_injected_labels
     global _state
     device = torch.device(devices.get())
     if device.type == 'cuda':
@@ -46,7 +46,10 @@ def initialize_worker(devices: object, logs: object, group_manifest: Path, segme
     assignments = read_table(data, 'train_assignments', keep_default_na=False)
     validation = read_table(data, 'validation_assignments', keep_default_na=False)
     references = read_table(data, 'references', keep_default_na=False)
-    sequences, _ = _load_sequences(segment_manifest)
+    injected_segments = read_table(inject_manifest.parent / 'data', 'segments', keep_default_na=False)
+    assignments = _with_injected_labels(assignments, injected_segments)
+    validation = _with_injected_labels(validation, injected_segments)
+    sequences, _ = _load_sequences(segment_manifest, inject_manifest)
     needed = set(assignments.segment_id) | set(validation.segment_id) | set(references.segment_id)
     sequences = {key: value for key, value in sequences.items() if key in needed}
     _state = WorkerState(device, assignments, validation, references, sequences, args, seed, output, logger)
@@ -75,6 +78,7 @@ def train_task(group_id: str, expert_id: int) -> dict[str, object]:
 
 
 def train_pool(tasks: list[tuple[str, int]], devices: list[torch.device], group_manifest: Path, segment_manifest: Path,
+               inject_manifest: Path,
                args: argparse.Namespace, seed: int, output: Path, logger: logging.Logger, workers: int) -> list[dict[str, object]]:
     """一个设备一个 spawn 进程，所有专家共享 executor 任务池；异常向上抛出。"""
     context = mp.get_context('spawn')
@@ -86,7 +90,7 @@ def train_pool(tasks: list[tuple[str, int]], devices: list[torch.device], group_
     listener.start()
     try:
         with ProcessPoolExecutor(max_workers=count, mp_context=context, initializer=initialize_worker,
-                                 initargs=(device_queue, logs, group_manifest, segment_manifest, args, seed,
+                                 initargs=(device_queue, logs, group_manifest, segment_manifest, inject_manifest, args, seed,
                                            output, max(1, workers // count), logger.level)) as executor:
             futures = [executor.submit(train_task, group, expert) for group, expert in tasks]
             return [future.result() for future in as_completed(futures)]
