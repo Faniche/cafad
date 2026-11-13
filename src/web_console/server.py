@@ -25,6 +25,7 @@ from .train_util import TrainTaskQueue
 from .web_util import ModuleHistoryUtil
 from .group_view import group_result
 from .segment_view import segment_result
+from src.modules.segment.manual_merge import merge_segments
 from .service import JobManager, build_command, module_catalog, module_schemas, serialize_schemas, upstream_manifest_choices
 
 
@@ -243,6 +244,20 @@ def create_handler(
                     result['history_entry'] = entry
                     _json_response(self, HTTPStatus.ACCEPTED, result)
                 except (ValueError, RuntimeError) as exc:
+                    _json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
+                return
+            if path == '/api/segment/merge':
+                if not self._authorized_response(True):
+                    return
+                try:
+                    payload = _read_json(self)
+                    artifact = payload.get('artifact')
+                    segment_ids = payload.get('segment_ids')
+                    phase = payload.get('phase')
+                    if not isinstance(artifact, str) or not isinstance(segment_ids, list) or not isinstance(phase, str):
+                        raise ValueError('手动合并参数无效')
+                    _json_response(self, HTTPStatus.OK, merge_segments(project_root, artifact, segment_ids, phase))
+                except (ValueError, RuntimeError, OSError, sqlite3.Error) as exc:
                     _json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
                 return
             if path != '/api/jobs':

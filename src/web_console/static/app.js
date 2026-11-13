@@ -669,7 +669,18 @@ async function loadHistoryDetail(moduleName, artifact) {
       const refresh = async () => {
         try {
           const result = await apiRequest(`/api/segment/result?artifact=${encodeURIComponent(artifact)}`);
-          if (selectedModule === 'segment' && version === detailVersion) renderSegmentResult(segmentResult, result);
+          if (selectedModule !== 'segment' || version !== detailVersion) return;
+          renderSegmentResult(segmentResult, result, {
+            canMerge: data.entry?.state === 'success',
+            merge: async ({ segment_ids, phase }) => {
+              const reply = await apiRequest('/api/segment/merge', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ artifact, segment_ids, phase }),
+              });
+              historyStatus.textContent = `已合并 ${reply.source_segment_ids.length} 个阶段；该运行当前共有 ${reply.segments} 个片段。`;
+              await refresh();
+            },
+          });
         } catch (error) { if (version === detailVersion) segmentResult.textContent = `阶段进度读取失败：${error.message}`; }
       };
       await refresh();

@@ -143,3 +143,19 @@ def write_manifest(context: RunContext, result: ModuleResult, report: Validation
         'outputs': outputs,
         'validation': 'validation.json',
     })
+
+
+def refresh_manifest_outputs(artifact_dir: Path) -> None:
+    """在受控的人工修订后重算成功产物的输出清单与哈希。"""
+    manifest_path = artifact_dir / 'manifest.json'
+    value = json.loads(manifest_path.read_text(encoding='utf-8'))
+    if not isinstance(value, dict) or value.get('status') != 'SUCCEEDED':
+        raise ValueError('只能刷新已成功发布产物的清单')
+    outputs = []
+    for path in sorted(artifact_dir.rglob('*')):
+        if path.is_file() and path.name != 'manifest.json':
+            outputs.append({'path': str(path.relative_to(artifact_dir)).replace('\\', '/'),
+                            'bytes': path.stat().st_size, 'sha256': hash_file(path)})
+    value['outputs'] = outputs
+    value['manual_revision'] = int(value.get('manual_revision', 0)) + 1
+    write_json(manifest_path, value)
