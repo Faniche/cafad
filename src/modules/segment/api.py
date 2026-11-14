@@ -14,17 +14,18 @@ from src.app.artifacts import read_manifest
 from src.app.contracts import ModuleResult, RunContext, ValidationReport
 from src.app.tables import export_csv, read_table, write_table
 from src.data_processing.phase_pipeline import PipelineConfig, process_cleaned_csv
+from src.data_processing.sun_phase import PHASES as SUN_PHASES
 
 
 def build_parser() -> argparse.ArgumentParser:
     """定义阶段识别模块参数。"""
-    parser = ProjectArgumentParser(prog='main.py -m segment', description='对训练／验证集的干净观测执行 Sun 阶段识别并生成片段。')
+    parser = ProjectArgumentParser(prog='main.py -m segment', description='对训练／验证集的干净观测执行阶段识别并生成片段。')
     parser.add_argument('--input', required=True, type=Path, help='split 模块已发布的 manifest.json')
     parser.add_argument('--flight-gap-seconds', type=float,
                         help='来源航班断开阈值；省略时继承 preprocess 记录的值')
-    parser.add_argument('--window-seconds', type=float, default=60.0)
-    parser.add_argument('--chunk-rows', type=int, default=200_000)
-    parser.add_argument('--buckets', type=int, default=128)
+    parser.add_argument('--window-seconds', type=float, default=60.0, help='Sun 模糊规则时间窗（秒）')
+    parser.add_argument('--chunk-rows', type=int, default=200_000, help='Sun 临时 CSV 分块行数')
+    parser.add_argument('--buckets', type=int, default=128, help='Sun 按航班散列的临时桶数')
     return parser
 
 
@@ -157,15 +158,16 @@ def _sequence_category(phases: tuple[str, ...]) -> str:
     return 'airborne_or_unresolved'
 
 
-def _write_sequence_review(data_dir: Path) -> dict[str, int]:
-    """输出按航班排列的原始阶段序列，作为后续语义二次处理的审计基线。"""
+def write_sequence_review(data_dir: Path) -> dict[str, int]:
+    """输出按航班排列的 Sun 原始阶段序列及其语义审计分类。"""
     segments = read_table(data_dir, 'segments', dtype={'segment_id': 'string', 'flight_id': 'string'})
     rows: list[dict[str, object]] = []
     for flight_id, frame in segments.sort_values(['flight_id', 'ordinal'], kind='stable').groupby('flight_id', sort=False):
         phases = tuple(frame['phase'].astype(str))
+        category = _sequence_category(phases)
         rows.append({'flight_id': str(flight_id), 'icao': str(frame['icao'].iloc[0]), 'call': str(frame['call'].iloc[0]),
                      'segments': int(len(frame)), 'phase_sequence': '>'.join(phases),
-                     'semantic_category': _sequence_category(phases),
+                     'semantic_category': category,
                      'starts_ground': phases[0] == 'GND', 'ends_ground': phases[-1] == 'GND'})
     review = pd.DataFrame(rows)
     write_table(review, data_dir, 'flight_phase_sequences')
@@ -182,27 +184,31 @@ def segment_observations(observations: pd.DataFrame, data_dir: Path, args: argpa
         raise ValueError('阶段识别输入缺少规范观测、分区或逐点标签字段')
     data_dir.mkdir(parents=True, exist_ok=True)
     write_table(observations, data_dir, 'input_observations')
+    phase_dir = data_dir / 'phase'
     staged_source = data_dir / '.input_observations.runtime.csv'
     export_csv(data_dir, 'input_observations', staged_source)
     config = PipelineConfig(altitude_unit='m', speed_unit='m/s', workers=workers,
                             chunk_rows=args.chunk_rows, buckets=args.buckets, window_seconds=args.window_seconds,
                             flight_gap_seconds=flight_gap_seconds, timestamp_unit='ns')
-    logger.debug('阶段识别运行：observations=%d；gap=%s；window=%s；chunk_rows=%d；buckets=%d；workers=%d',
+    logger.debug('Sun 阶段识别运行：observations=%d；gap=%s；window=%s；chunk_rows=%d；buckets=%d；workers=%d',
                  len(observations), flight_gap_seconds, args.window_seconds, args.chunk_rows, args.buckets, workers)
-    summary = process_cleaned_csv(staged_source, data_dir / 'phase', config,
-                                  column_overrides={'icao': 'icao', 'call': 'call', 'time': 'time_ns',
-                                                    'altitude': 'geometric_altitude_m', 'speed': 'speed_mps',
-                                                    'longitude': 'longitude_deg', 'latitude': 'latitude_deg'},
-                                  progress_database=data_dir / 'segment_progress.sqlite', logger=logger)
+    try:
+        summary = process_cleaned_csv(staged_source, phase_dir, config,
+                                      column_overrides={'icao': 'icao', 'call': 'call', 'time': 'time_ns',
+                                                        'altitude': 'geometric_altitude_m', 'speed': 'speed_mps',
+                                                        'longitude': 'longitude_deg', 'latitude': 'latitude_deg'},
+                                      progress_database=data_dir / 'segment_progress.sqlite', logger=logger)
+    finally:
+        staged_source.unlink(missing_ok=True)
     linked = _write_segment_tables(data_dir, data_dir / 'phase')
-    staged_source.unlink()
     shutil.rmtree(data_dir / 'phase')
-    categories = _write_sequence_review(data_dir)
-    return {**summary, **linked, 'sequence_categories': categories}
+    categories = write_sequence_review(data_dir)
+    return {**summary, **linked, 'segmenter': 'sun', 'phase_labels': list(SUN_PHASES),
+            'sequence_categories': categories}
 
 
 def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
-    """仅对训练／验证集的干净轨迹执行 Sun 阶段识别，冻结后不受注入扰动。"""
+    """仅对训练／验证集的干净轨迹执行选定阶段识别，冻结后不受注入扰动。"""
     input_manifest = _project_path(context, args.input).resolve()
     manifest = read_manifest(input_manifest, expected_module='split')
     if manifest.get('dataset_id') != context.dataset_id:
@@ -223,7 +229,8 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
     data_dir = context.staging_dir / 'data'
     summary = segment_observations(observations, data_dir, args, context.workers, context.logger, gap)
     combined: dict[str, object] = {'input_manifest': str(input_manifest), 'preprocess_manifest': str(preprocess),
-                                   'flight_gap_seconds': gap, 'window_seconds': args.window_seconds, **summary}
+                                   'flight_gap_seconds': gap, 'window_seconds': args.window_seconds,
+                                   'segmenter': 'sun', **summary}
     context.logger.info('阶段片段完成：可识别点=%d，片段=%d，异常片段=%d，不可识别航班=%d／点=%d',
                         summary['points'], summary['segments'], summary['anomalous_segments'],
                         summary['unrecognized_flights'], summary['unrecognized_points'])
@@ -250,7 +257,7 @@ def validate_outputs(context: RunContext, args: argparse.Namespace, result: Modu
     actual = segments.set_index('segment_id')['segment_label'].astype(np.int8)
     if not expected.equals(actual.reindex(expected.index)):
         raise ValueError('片段标签不等于记录标签的 OR')
-    if not set(segments['phase']).issubset({'GND', 'CL', 'DE', 'CR', 'LVL', 'NA'}):
+    if not set(segments['phase']).issubset(set(SUN_PHASES)):
         raise ValueError('存在未知阶段标签')
     if 'split' in observations.columns:
         if (mapping['split'].isna().any() or segments['split'].isna().any()

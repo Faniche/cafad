@@ -331,6 +331,8 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
         raise ValueError('HDBSCAN 候选、min-group-members、max-group-fraction、min-reference-flights 和 distance-block-size 必须有效；最小成员及参考航班数至少为 2')
     input_manifest = _project_path(context, args.input).resolve()
     segments, values = _read_segment_store(input_manifest)
+    # Sun 回退保留独立标签来源；其 NA 与原 Sun 的 NA 同样不表示可用飞行阶段，
+    # 因而不能作为正常参考或训练路由目标。
     recognized = segments.loc[~segments['phase'].eq('NA')].copy()
     normal = recognized.loc[recognized['split'].eq('train') & recognized['injection_plan'].eq('normal')].copy()
     if normal.empty:

@@ -7,6 +7,7 @@ from http import HTTPStatus
 from http.server import ThreadingHTTPServer
 import json
 from pathlib import Path
+import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 import threading
@@ -16,10 +17,15 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+import pandas as pd
+
 from src.web_console.server import create_handler
 from src.web_console.restart import RestartController
 from src.web_console.history import delete_history_run, history_detail, list_module_history
+from src.web_console.segment_view import segment_result, update_segment_phases
 from src.web_console.service import JobManager, build_command, module_schemas
+from src.app.module_catalog import artifact_module_directory
+from src.app.tables import read_table, write_table
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -80,14 +86,18 @@ class WebConsoleTests(unittest.TestCase):
         self.assertEqual(command[command.index('--anomaly-ratios') + 1:command.index('--anomaly-ratios') + 4],
                          ('0.5', '0.4', '0.6'))
 
-    def test_inject_derives_preprocess_manifest_from_selected_split_manifest(self) -> None:
-        """网页只选择最近的 split 产物，早期 preprocess 输入必须沿依赖链自动恢复。"""
+    def test_inject_uses_only_selected_group_manifest(self) -> None:
+        """网页只暴露 inject 的直接 group 输入，较早祖先由模块清单溯源。"""
         with TemporaryDirectory() as directory:
             project_root = Path(directory)
             preprocess = project_root / 'data' / '0_preprocess' / 'fixture' / '1#20261107_100000#42' / 'manifest.json'
             split = project_root / 'data' / '1_split' / 'fixture' / '1#20261107_100100#42' / 'manifest.json'
+            segment = project_root / 'data' / '2_segment' / 'fixture' / '1#20261107_100200#42' / 'manifest.json'
+            group = project_root / 'data' / '3_group' / 'fixture' / '1#20261107_100300#42' / 'manifest.json'
             preprocess.parent.mkdir(parents=True)
             split.parent.mkdir(parents=True)
+            segment.parent.mkdir(parents=True)
+            group.parent.mkdir(parents=True)
             preprocess.write_text(json.dumps({
                 'status': 'SUCCEEDED', 'module': 'preprocess', 'dataset_id': 'fixture', 'outputs': [], 'dependencies': [],
             }), encoding='utf-8')
@@ -95,16 +105,23 @@ class WebConsoleTests(unittest.TestCase):
                 'status': 'SUCCEEDED', 'module': 'split', 'dataset_id': 'fixture', 'outputs': [],
                 'dependencies': [{'manifest': str(preprocess.resolve()), 'sha256': 'fixture'}],
             }), encoding='utf-8')
+            segment.write_text(json.dumps({
+                'status': 'SUCCEEDED', 'module': 'segment', 'dataset_id': 'fixture', 'outputs': [],
+                'dependencies': [{'manifest': str(split.resolve()), 'sha256': 'fixture'}],
+            }), encoding='utf-8')
+            group.write_text(json.dumps({
+                'status': 'SUCCEEDED', 'module': 'group', 'dataset_id': 'fixture', 'outputs': [],
+                'dependencies': [{'manifest': str(segment.resolve()), 'sha256': 'fixture'}],
+            }), encoding='utf-8')
             command = build_command(project_root, {
                 'module': 'inject', 'global': {},
                 'module_args': {
-                    'input': 'malicious/ignored/manifest.json',
-                    'split_manifest': split.relative_to(project_root).as_posix(),
+                    'input': group.relative_to(project_root).as_posix(),
                     'protocol': 'configs/injection_protocol_example.yaml',
                 },
             }, self.schemas)
-            self.assertEqual(command[command.index('--input') + 1], preprocess.relative_to(project_root).as_posix())
-            self.assertEqual(command[command.index('--split-manifest') + 1], split.relative_to(project_root).as_posix())
+            self.assertEqual(command[command.index('--input') + 1], group.relative_to(project_root).as_posix())
+            self.assertNotIn('--split-manifest', command)
 
     def test_preprocess_display_defaults_are_declared_in_the_static_form(self) -> None:
         """首次渲染 preprocess 时显示原始数据常用单位，仍允许下拉列表覆盖。"""
@@ -197,6 +214,94 @@ class WebConsoleTests(unittest.TestCase):
             self.assertTrue(other_preprocess.exists())
             self.assertTrue(independent_split.exists())
 
+    def test_segment_phase_edit_updates_linked_records_and_blocks_descendants(self) -> None:
+        """人工修订必须同步正式片段、逐点、实时表和审计，且不能改写已有下游输入。"""
+        with TemporaryDirectory() as directory:
+            project_root = Path(directory)
+            segment = self._write_history_run(project_root, 'segment', 'fixture', '1#20261113_160000#42')
+            config_path = segment / 'resolved_config.json'
+            config = json.loads(config_path.read_text(encoding='utf-8'))
+            config_path.write_text(json.dumps(config), encoding='utf-8')
+            data_dir = segment / 'data'
+            data_dir.mkdir()
+            write_table(pd.DataFrame([
+                {'segment_id': 'seg-1', 'flight_id': 'flight-1', 'icao': 'ABC001', 'call': 'CALL1',
+                 'phase': 'CL', 'ordinal': 0, 'points': 2, 'start_time': '2026-11-13T00:00:00+00:00',
+                 'end_time': '2026-11-13T00:00:01+00:00'},
+                {'segment_id': 'seg-2', 'flight_id': 'flight-1', 'icao': 'ABC001', 'call': 'CALL1',
+                 'phase': 'CR', 'ordinal': 1, 'points': 1, 'start_time': '2026-11-13T00:00:02+00:00',
+                 'end_time': '2026-11-13T00:00:02+00:00'},
+            ]), data_dir, 'segments')
+            write_table(pd.DataFrame([
+                {'record_id': 'record-1', 'flight_id': 'flight-1', 'time_ns': 1, 'segment_id': 'seg-1', 'phase': 'CL'},
+                {'record_id': 'record-2', 'flight_id': 'flight-1', 'time_ns': 2, 'segment_id': 'seg-1', 'phase': 'CL'},
+                {'record_id': 'record-3', 'flight_id': 'flight-1', 'time_ns': 3, 'segment_id': 'seg-2', 'phase': 'CR'},
+            ]), data_dir, 'point_segment_map')
+            database = sqlite3.connect(data_dir / 'segment_progress.sqlite')
+            try:
+                database.execute(
+                    'CREATE TABLE segments (segment_id TEXT PRIMARY KEY, flight_id TEXT, icao TEXT, call TEXT, phase TEXT, '
+                    'points INTEGER, start_time TEXT, end_time TEXT, duration_seconds REAL, start_longitude_deg REAL, '
+                    'start_latitude_deg REAL, end_longitude_deg REAL, end_latitude_deg REAL, span_km REAL, '
+                    'start_altitude_m REAL, end_altitude_m REAL)'
+                )
+                database.executemany(
+                    'INSERT INTO segments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    [('seg-1', 'flight-1', 'ABC001', 'CALL1', 'CL', 2, 'a', 'b', 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0),
+                     ('seg-2', 'flight-1', 'ABC001', 'CALL1', 'CR', 1, 'c', 'd', 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 2.0)],
+                )
+                database.commit()
+            finally:
+                database.close()
+            artifact = segment.relative_to(project_root).as_posix()
+            initial = segment_result(project_root, artifact)
+            self.assertTrue(initial['editable'])
+            self.assertEqual({row['phase_source'] for row in initial['rows']}, {'sun'})
+            cache = segment / 'flight_trajectory_svg' / 'flight-1.svg'
+            cache.parent.mkdir()
+            cache.write_text('<svg/>', encoding='utf-8')
+            changed = update_segment_phases(project_root, artifact, ['seg-1'], 'DE')
+            self.assertEqual(changed['changed_segments'], 1)
+            self.assertFalse(cache.exists())
+            self.assertEqual(read_table(data_dir, 'segments').set_index('segment_id').loc['seg-1', 'phase'], 'DE')
+            point_map = read_table(data_dir, 'point_segment_map')
+            self.assertEqual(set(point_map.loc[point_map['segment_id'] == 'seg-1', 'phase']), {'DE'})
+            progress = sqlite3.connect(data_dir / 'segment_progress.sqlite')
+            try:
+                self.assertEqual(progress.execute("SELECT phase FROM segments WHERE segment_id = 'seg-1'").fetchone()[0], 'DE')
+            finally:
+                progress.close()
+            audit = read_table(data_dir, 'phase_label_overrides')
+            self.assertEqual(audit[['segment_id', 'previous_phase', 'phase']].to_dict('records'),
+                             [{'segment_id': 'seg-1', 'previous_phase': 'CL', 'phase': 'DE'}])
+            review = read_table(data_dir, 'flight_phase_sequences')
+            self.assertEqual(review.loc[0, 'phase_sequence'], 'DE>CR')
+            manifest = json.loads((segment / 'manifest.json').read_text(encoding='utf-8'))
+            self.assertTrue(any(item['path'] == 'data/phase_label_overrides.parquet' for item in manifest['outputs']))
+            self._write_history_run(project_root, 'group', 'fixture', '1#20261113_160100#42', [segment / 'manifest.json'])
+            with self.assertRaisesRegex(ValueError, '下游产物'):
+                update_segment_phases(project_root, artifact, ['seg-2'], 'DE')
+
+    def test_history_logs_share_the_task_output_panel(self) -> None:
+        """历史查看不再生成第二个日志面板，避免同一日志在两处展示。"""
+        index = (ROOT / 'src' / 'web_console' / 'static' / 'index.html').read_text(encoding='utf-8')
+        script = (ROOT / 'src' / 'web_console' / 'static' / 'app.js').read_text(encoding='utf-8')
+        self.assertNotIn('id="history-logs"', index)
+        self.assertIn('showHistoryTaskOutput(data)', script)
+        self.assertNotIn('historyLogs', script)
+
+    def test_segment_phase_filter_allows_multiple_checkbox_values(self) -> None:
+        """阶段筛选允许并集选择；未选标签时仍展示全部记录。"""
+        script = (ROOT / 'src' / 'web_console' / 'static' / 'segment_view.js').read_text(encoding='utf-8')
+        self.assertIn('const selectedPhaseFilters = new Set()', script)
+        self.assertNotIn('showDlrResults', script)
+        self.assertIn('阶段筛选（可多选；未勾选显示全部）', script)
+        self.assertIn("document.querySelector('#flight-plot-dialog')", script)
+        self.assertIn('flightPlotDialog.showModal()', script)
+        self.assertIn('closeFlightPlot', script)
+        self.assertIn("filter.type = 'checkbox'", script)
+        self.assertIn('!selectedPhaseFilters.size || selectedPhaseFilters.has(row.phase)', script)
+
     def test_job_manager_returns_only_the_selected_modules_last_job(self) -> None:
         """任务列表按模块查询；未运行模块不能复用其他模块的输出。"""
         manager = JobManager(ROOT, lambda message, *values: None)
@@ -246,21 +351,19 @@ class WebConsoleTests(unittest.TestCase):
                 schema = json.loads(response.read().decode('utf-8'))
             self.assertIn('split', schema['modules'])
             self.assertEqual(schema['module_order'], [
-                'preprocess', 'split', 'inject', 'segment', 'group', 'train', 'calibrate', 'detect', 'evaluate',
+                'preprocess', 'split', 'segment', 'group', 'inject', 'train', 'calibrate', 'detect', 'evaluate',
             ])
             split_input = next(option for option in schema['modules']['split'] if option['dest'] == 'input')
             self.assertEqual(split_input['upstream_module'], 'preprocess')
             inject_input = next(option for option in schema['modules']['inject'] if option['dest'] == 'input')
-            inject_split = next(option for option in schema['modules']['inject'] if option['dest'] == 'split_manifest')
             segment_input = next(option for option in schema['modules']['segment'] if option['dest'] == 'input')
             group_input = next(option for option in schema['modules']['group'] if option['dest'] == 'input')
             train_input = next(option for option in schema['modules']['train'] if option['dest'] == 'input')
-            self.assertEqual(inject_input['upstream_module'], 'preprocess')
-            self.assertTrue(inject_input['auto_derived'])
-            self.assertEqual(inject_split['upstream_module'], 'split')
-            self.assertEqual(segment_input['upstream_module'], 'inject')
+            self.assertEqual(segment_input['upstream_module'], 'split')
             self.assertEqual(group_input['upstream_module'], 'segment')
-            self.assertEqual(train_input['upstream_module'], 'group')
+            self.assertEqual(inject_input['upstream_module'], 'group')
+            self.assertFalse(inject_input['auto_derived'])
+            self.assertEqual(train_input['upstream_module'], 'inject')
             self.assertEqual([item['dest'] for item in schema['modules']['train'] if item['upstream_module']], ['input'])
 
     def test_restart_endpoint_requires_login_and_idle_console(self) -> None:
@@ -337,19 +440,25 @@ class WebConsoleTests(unittest.TestCase):
             (split_run / 'manifest.json').write_text(json.dumps({
                 'status': 'SUCCEEDED', 'module': 'split', 'outputs': [], 'summary': {},
             }), encoding='utf-8')
+            segment_run = project_root / 'data' / '2_segment' / 'fixture' / '1#20261105_120020#42'
+            segment_run.mkdir(parents=True)
+            (segment_run / 'manifest.json').write_text(json.dumps({
+                'status': 'SUCCEEDED', 'module': 'segment', 'outputs': [], 'summary': {},
+            }), encoding='utf-8')
+            group_run = project_root / 'data' / '3_group' / 'fixture' / '1#20261105_120030#42'
+            group_run.mkdir(parents=True)
+            (group_run / 'manifest.json').write_text(json.dumps({
+                'status': 'SUCCEEDED', 'module': 'group', 'outputs': [], 'summary': {},
+            }), encoding='utf-8')
             with test_server(project_root) as server:
                 base_url = f'http://127.0.0.1:{server.server_port}'
                 cookie = self._login(base_url, TOKEN)
-                inject_preprocess = self._get_json(
+                inject_group = self._get_json(
                     f'{base_url}/api/upstream-runs?module=inject&argument=input', cookie)
-                inject_split = self._get_json(
-                    f'{base_url}/api/upstream-runs?module=inject&argument=split_manifest', cookie)
-            self.assertEqual(inject_preprocess['runs'][0]['manifest'],
-                             'data/0_preprocess/fixture/1#20261105_120000#42/manifest.json')
-            self.assertEqual(inject_split['runs'], [{
-                'dataset': 'fixture', 'run_name': '1#20261105_120010#42',
-                'label': 'fixture / 1#20261105_120010#42',
-                'manifest': 'data/1_split/fixture/1#20261105_120010#42/manifest.json',
+            self.assertEqual(inject_group['runs'], [{
+                'dataset': 'fixture', 'run_name': '1#20261105_120030#42',
+                'label': 'fixture / 1#20261105_120030#42',
+                'manifest': 'data/3_group/fixture/1#20261105_120030#42/manifest.json',
             }])
 
     def test_file_browser_lists_project_items_and_rejects_parent_escape(self) -> None:
@@ -400,7 +509,7 @@ class WebConsoleTests(unittest.TestCase):
                            dependencies: list[Path] | None = None) -> Path:
         """生成最小已发布运行，用于验证历史与删除闭包而不依赖业务大文件。"""
         counter, timestamp, seed = run_name.split('#')
-        run_dir = project_root / 'data' / f'{["preprocess", "split", "inject"].index(module_name)}_{module_name}' / dataset / run_name
+        run_dir = project_root / 'data' / artifact_module_directory(module_name) / dataset / run_name
         run_dir.mkdir(parents=True)
         (run_dir / 'resolved_config.json').write_text(json.dumps({
             'global': {'seed': int(seed)}, 'module_name': module_name, 'dataset_id': dataset,

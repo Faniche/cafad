@@ -24,7 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _test_segmentation(context: RunContext, trained: Path, output: Path) -> dict[str, object]:
-    """依据训练时冻结的 Sun 配置，对从未参与 group 的测试观测动态生成阶段片段。"""
+    """依据训练时冻结的分段配置，对从未参与 group 的测试观测动态生成阶段片段。"""
     injected = upstream(trained, 'inject')
     grouped = _group_manifest(injected)
     segmented = _segment_manifest(grouped)
@@ -32,16 +32,20 @@ def _test_segmentation(context: RunContext, trained: Path, output: Path) -> dict
     segment_summary = json.loads((segmented.parent / 'summary.json').read_text(encoding='utf-8'))
     required = ('window_seconds', 'chunk_rows', 'buckets')
     if not isinstance(config, dict) or any(name not in config for name in required):
-        raise ValueError('训练祖先 segment 未记录完整 Sun 分段配置')
+        raise ValueError('训练祖先 segment 未记录完整分段配置')
     source = read_table(injected.parent / 'data', 'observations',
                         dtype={'record_id': 'string', 'flight_id': 'string'})
     test = source.loc[source['split'].eq('test')].copy()
     if test.empty:
         raise ValueError('inject 产物没有测试集观测')
+    if str(segment_summary.get('segmenter', 'sun')) != 'sun':
+        raise ValueError('训练祖先使用已废弃的 DLR 分段；请从 segment 重新运行 Sun，再依次运行 group、inject、train、calibrate')
     runtime = argparse.Namespace(window_seconds=float(config['window_seconds']),
-                                 chunk_rows=int(config['chunk_rows']), buckets=int(config['buckets']))
+                                 chunk_rows=int(config['chunk_rows']), buckets=int(config['buckets']),
+                                 )
     summary = segment_observations(test, output, runtime, context.workers, context.logger,
-                                   float(segment_summary.get('flight_gap_seconds') or config.get('flight_gap_seconds') or 1800.0))
+                                   float(segment_summary.get('flight_gap_seconds') or config.get('flight_gap_seconds') or 1800.0),
+                                   )
     context.logger.info('测试集动态分段完成：points=%d；segments=%d；sequence_categories=%s',
                         summary['points'], summary['segments'], summary['sequence_categories'])
     return summary

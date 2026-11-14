@@ -13,6 +13,7 @@ import pandas as pd
 import torch
 
 from src.app.cli import main
+from src.app.tables import read_table, write_table
 from src.modules.train.api import _train_expert
 from src.utils.strings import PathUtils
 from tests.test_data_module_pipeline import write_adsb_fixture
@@ -63,21 +64,27 @@ class GroupTrainTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             data = root / 'data'; data.mkdir()
-            frames = [_sequence(i) for i in range(3)]
-            pd.concat(frames).to_csv(data / 'input_observations.csv', index=False)
-            pd.DataFrame([{'segment_id': f's{i}', 'record_id': record}
-                          for i, frame in enumerate(frames) for record in frame.record_id]).to_csv(data / 'point_segment_map.csv', index=False)
-            pd.DataFrame([{'segment_id': f's{i}', 'flight_id': f'F{i}'} for i in range(3)]).to_csv(data / 'segments.csv', index=False)
-            assignments = pd.DataFrame([{'group_id': g, 'segment_id': 's2', 'flight_id': 'F2', 'segment_label': 1} for g in ('g0', 'g1')])
-            assignments.to_csv(data / 'train_assignments.csv', index=False)
-            assignments.to_csv(data / 'validation_assignments.csv', index=False)
-            pd.DataFrame([{'group_id': g, 'segment_id': f's{i}', 'flight_id': f'F{i}'}
-                          for g in ('g0', 'g1') for i in (0, 1)]).to_csv(data / 'references.csv', index=False)
+            frames = [_sequence(i) for i in range(4)]
+            write_table(pd.concat(frames), data, 'input_observations')
+            write_table(pd.DataFrame([{'segment_id': f's{i}', 'record_id': record}
+                                      for i, frame in enumerate(frames) for record in frame.record_id]), data, 'point_segment_map')
+            write_table(pd.DataFrame([
+                {'segment_id': f's{i}', 'flight_id': f'F{i}', 'segment_label': int(i >= 2)} for i in range(4)
+            ]), data, 'segments')
+            assignments = pd.DataFrame([
+                {'group_id': 'g0', 'segment_id': 's2', 'flight_id': 'F2', 'segment_label': 1},
+                {'group_id': 'g1', 'segment_id': 's3', 'flight_id': 'F3', 'segment_label': 1},
+            ])
+            write_table(assignments, data, 'train_assignments')
+            write_table(assignments, data, 'validation_assignments')
+            write_table(pd.DataFrame([{'group_id': g, 'segment_id': f's{i}', 'flight_id': f'F{i}'}
+                                      for g in ('g0', 'g1') for i in (0, 1)]), data, 'references')
             args = build_parser().parse_args(['--input', str(root / 'manifest.json'), '--d-model', '8', '--epochs', '1',
                                               '--precision', 'fp32'])
             logger = logging.getLogger('test.pool'); logger.handlers = [logging.NullHandler()]
             result = train_pool([('g0', 0), ('g1', 1)], [torch.device('cpu'), torch.device('cpu')],
-                                root / 'manifest.json', root / 'manifest.json', args, 42, root / 'models', logger, 2)
+                                root / 'manifest.json', root / 'manifest.json', root / 'manifest.json',
+                                args, 42, root / 'models', logger, 2)
             self.assertEqual({item['group_id'] for item in result}, {'g0', 'g1'})
             progress = json.loads((root / 'training_progress.json').read_text(encoding='utf-8'))
             self.assertEqual({row['state'] for row in progress['experts']}, {'completed'})
@@ -107,39 +114,39 @@ class GroupTrainTests(unittest.TestCase):
             pre = next((base / 'data' / '0_preprocess' / 'fixture').iterdir())
             self._run(base, ['--seed', '10', '-m', 'split', '--input', str(pre / 'manifest.json')])
             split = next((base / 'data' / '1_split' / 'fixture').iterdir())
-            protocol = base / 'protocol.json'
-            protocol.write_text(json.dumps(_protocol()), encoding='utf-8')
-            self._run(base, ['--seed', '10', '-m', 'inject', '--input', str(pre / 'manifest.json'), '--split-manifest',
-                             str(split / 'manifest.json'), '--protocol', str(protocol)])
-            injected = next((base / 'data' / '2_inject' / 'fixture').iterdir())
-            self._run(base, ['-m', 'segment', '--input', str(injected / 'manifest.json'), '--window-seconds', '60', '--buckets', '2', '--chunk-rows', '10'])
-            segmented = next((base / 'data' / '3_segment' / 'fixture').iterdir())
+            self._run(base, ['-m', 'segment', '--input', str(split / 'manifest.json'),
+                             '--window-seconds', '60', '--buckets', '2', '--chunk-rows', '10'])
+            segmented = next((base / 'data' / '2_segment' / 'fixture').iterdir())
             self._run(base, ['-m', 'group', '--input', str(segmented / 'manifest.json'),
                              '--min-cluster-sizes', '2', '--min-samples-values', '1', '--min-group-members', '2', '--max-group-fraction', '1'])
-            grouped = next((base / 'data' / '4_group' / 'fixture').iterdir())
-            groups = pd.read_csv(grouped / 'data' / 'groups.csv')
-            assignments = pd.read_csv(grouped / 'data' / 'train_assignments.csv')
-            selection = pd.read_csv(grouped / 'data' / 'hdbscan_selection.csv')
+            grouped = next((base / 'data' / '3_group' / 'fixture').iterdir())
+            protocol = base / 'protocol.json'
+            protocol.write_text(json.dumps(_protocol()), encoding='utf-8')
+            self._run(base, ['--seed', '10', '-m', 'inject', '--input', str(grouped / 'manifest.json'), '--protocol', str(protocol)])
+            injected = next((base / 'data' / '4_inject' / 'fixture').iterdir())
+            groups = read_table(grouped / 'data', 'groups')
+            assignments = read_table(grouped / 'data', 'train_assignments')
+            selection = read_table(grouped / 'data', 'hdbscan_selection')
             feature_scaler = json.loads((grouped / 'data' / 'feature_scaler.json').read_text(encoding='utf-8'))
             self.assertFalse(groups.empty); self.assertFalse(assignments.empty)
             self.assertEqual(len(feature_scaler['feature_names']), 13)
             self.assertEqual(len(feature_scaler['weights']), 13)
-            self.assertTrue((grouped / 'data' / 'segment_features.csv').is_file())
+            self.assertTrue((grouped / 'data' / 'segment_features.parquet').is_file())
             self.assertEqual(int(selection['selected'].sum()), selection['phase'].nunique())
             self.assertTrue(assignments['segment_id'].is_unique)
             self.assertTrue(set(assignments['segment_label']).issubset({0, 1}))
-            self._run(base, ['-m', 'train', '--input', str(grouped / 'manifest.json'), '--gpus', 'cpu', '--d-model', '8',
+            self._run(base, ['-m', 'train', '--input', str(injected / 'manifest.json'), '--gpus', 'cpu', '--d-model', '8',
                              '--branch-heads', '2', '--group-heads', '2', '--pool-heads', '2', '--memory-slots', '2',
                              '--ref-limit', '2', '--batch-size', '2', '--epochs', '1', '--patience', '1', '--precision', 'fp32'])
             trained = next((base / 'data' / '5_train' / 'fixture').iterdir())
-            summary = pd.read_csv(trained / 'expert_summary.csv')
+            summary = read_table(trained, 'expert_summary')
             self.assertEqual(len(summary), len(groups))
             self.assertTrue(summary['checkpoint_selection'].isin({'validation_loss', 'training_loss_no_validation'}).all())
             for group_id in summary['group_id']:
                 self.assertTrue((trained / 'models' / group_id / 'memory.npy').is_file())
             from src.modules.detect.inference import score_partition
             scores, pairs, _ = score_partition(trained / 'manifest.json', 'val', 3, 1.0, 'cpu', logging.getLogger('test.detect'))
-            self.assertNotIn('segment_label', scores.columns)
+            self.assertIn('segment_label', scores.columns)
             self.assertTrue(scores['score'].between(0, 1).all())
             self.assertTrue(pairs['score'].between(0, 1).all())
 

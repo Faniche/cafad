@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -10,6 +11,7 @@ from unittest.mock import patch
 import pandas as pd
 
 from src.app.cli import main
+from src.app.tables import read_table
 from src.utils.strings import PathUtils
 
 
@@ -46,6 +48,11 @@ def write_adsb_fixture(path: Path) -> None:
     negative_speed['时间'] = (start + pd.Timedelta(seconds=12)).isoformat()
     negative_speed['速度'] = -0.1
     rows.append(negative_speed)
+    isolated = dict(rows[0])
+    isolated['icao号'] = 'SINGLE1'
+    isolated['call号'] = 'ONEPT'
+    isolated['时间'] = (start + pd.Timedelta(hours=5)).isoformat()
+    rows.append(isolated)
     pd.DataFrame(rows).to_csv(path, index=False, encoding='utf-8')
 
 
@@ -57,8 +64,8 @@ class DataModulePipelineTests(unittest.TestCase):
         with patch.object(PathUtils, 'get_project_root', return_value=cwd):
             self.assertEqual(main(arguments), 0)
 
-    def test_preprocess_split_inject_and_segment_are_independent_published_steps(self) -> None:
-        """规范观测、划分、单副本注入和 Sun 切分可隔进程顺序恢复。"""
+    def test_preprocess_split_segment_group_and_inject_are_independent_published_steps(self) -> None:
+        """干净 train/val 先分段建组；注入随后保留边界并覆盖片段标签。"""
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             source = base / 'preprocessed_data_fixture.csv'
@@ -72,26 +79,41 @@ class DataModulePipelineTests(unittest.TestCase):
                 '--altitude-unit', 'm', '--speed-unit', 'm/s', '--heading-unit', 'deg', '--flight-gap-seconds', '90',
             ], base)
             preprocess_dir = next((base / 'data' / '0_preprocess' / 'preprocessed_data_fixture').iterdir())
-            observations = pd.read_csv(preprocess_dir / 'data' / 'observations.csv')
-            rejections = pd.read_csv(preprocess_dir / 'data' / 'rejections.csv')
+            observations = read_table(preprocess_dir / 'data', 'observations')
+            rejections = read_table(preprocess_dir / 'data', 'rejections')
             self.assertEqual(len(observations), 70)
-            self.assertEqual(len(rejections), 3)
+            self.assertEqual(len(rejections), 4)
             self.assertFalse(observations.duplicated(['icao', 'call', 'time_ns']).any())
             self.assertTrue(observations['speed_mps'].ge(0.0).all())
             self.assertIn('negative_speed', set(rejections['reason']))
-            self.assertEqual(len(observations) + len(rejections), 73)
+            self.assertIn('flight_records_below_minimum_2', set(rejections['reason']))
+            self.assertEqual(len(observations) + len(rejections), 74)
             self.run_command([
                 '--seed', '10', '-m', 'split', '--input',
                 str(preprocess_dir / 'manifest.json'),
             ], base)
             split_dir = next((base / 'data' / '1_split' / 'preprocessed_data_fixture').iterdir())
-            splits = pd.read_csv(split_dir / 'data' / 'splits.csv')
+            splits = read_table(split_dir / 'data', 'splits')
             self.assertEqual(splits['split'].value_counts().to_dict(), {'train': 10, 'val': 2, 'test': 2})
             self.assertEqual(splits.groupby(['split', 'injection_plan']).size().to_dict(), {
                 ('test', 'abnormal'): 1, ('test', 'normal'): 1,
                 ('train', 'abnormal'): 5, ('train', 'normal'): 5,
                 ('val', 'abnormal'): 1, ('val', 'normal'): 1,
             })
+            self.run_command([
+                '-m', 'segment', '--input', str(split_dir / 'manifest.json'),
+                '--window-seconds', '60', '--buckets', '2', '--chunk-rows', '10',
+            ], base)
+            segment_dir = next((base / 'data' / '2_segment' / 'preprocessed_data_fixture').iterdir())
+            mapping = read_table(segment_dir / 'data', 'point_segment_map')
+            clean_segments = read_table(segment_dir / 'data', 'segments')
+            self.assertEqual(set(mapping['split']), {'train', 'val'})
+            self.assertTrue(clean_segments['segment_label'].eq(0).all())
+            self.run_command([
+                '-m', 'group', '--input', str(segment_dir / 'manifest.json'),
+                '--min-cluster-sizes', '2', '--min-samples-values', '1', '--min-group-members', '2',
+            ], base)
+            group_dir = next((base / 'data' / '3_group' / 'preprocessed_data_fixture').iterdir())
             protocol = base / 'test_injection_protocol.json'
             protocol.write_text(json.dumps({
                 'schema_version': 2,
@@ -130,14 +152,13 @@ class DataModulePipelineTests(unittest.TestCase):
                 'motion_transfer': {'scale_range': [0.8, 1.2]},
             }), encoding='utf-8')
             self.run_command([
-                '--seed', '10', '-m', 'inject', '--input', str(preprocess_dir / 'manifest.json'),
-                '--split-manifest', str(split_dir / 'manifest.json'),
+                '--seed', '10', '-m', 'inject', '--input', str(group_dir / 'manifest.json'),
                 '--protocol', str(protocol),
             ], base)
-            inject_dir = next((base / 'data' / '2_inject' / 'preprocessed_data_fixture').iterdir())
-            injected = pd.read_csv(inject_dir / 'data' / 'observations.csv')
-            record_labels = pd.read_csv(inject_dir / 'data' / 'record_labels.csv')
-            injection_events = pd.read_csv(inject_dir / 'data' / 'injection_events.csv')
+            inject_dir = next((base / 'data' / '4_inject' / 'preprocessed_data_fixture').iterdir())
+            injected = read_table(inject_dir / 'data', 'observations')
+            record_labels = read_table(inject_dir / 'data', 'record_labels')
+            injection_events = read_table(inject_dir / 'data', 'injection_events')
             self.assertTrue(injected.columns.tolist()[-4:] == ['split', 'injection_plan', 'injection_outcome', 'injection_skip_reason'])
             self.assertTrue(record_labels['injected_label'].eq(injected['injected_label']).all())
             self.assertFalse(injection_events.empty)
@@ -145,36 +166,38 @@ class DataModulePipelineTests(unittest.TestCase):
             planned = splits.set_index('flight_id')['injection_plan']
             self.assertTrue(actual_flight_labels[planned.eq('normal')].eq(0).all())
             self.assertTrue(actual_flight_labels[planned.eq('abnormal')].eq(1).all())
-            self.run_command([
-                '-m', 'segment', '--input',
-                str(inject_dir / 'manifest.json'), '--window-seconds', '60', '--buckets', '2', '--chunk-rows', '10',
-            ], base)
-            segment_dir = next((base / 'data' / '3_segment' / 'preprocessed_data_fixture').iterdir())
-            mapping = pd.read_csv(segment_dir / 'data' / 'point_segment_map.csv')
-            segments = pd.read_csv(segment_dir / 'data' / 'segments.csv')
-            unrecognized = pd.read_csv(segment_dir / 'data' / 'unrecognized_trajectories.csv')
-            unrecognized_points = pd.read_csv(segment_dir / 'data' / 'unrecognized_point_map.csv')
-            manifest = json.loads((segment_dir / 'manifest.json').read_text(encoding='utf-8'))
-            self.assertEqual(len(mapping), len(observations))
+            segments = read_table(inject_dir / 'data', 'segments')
+            self.assertEqual(len(mapping), len(observations) - 10)
             self.assertFalse(mapping['record_id'].duplicated().any())
             self.assertIn('split', mapping.columns)
             self.assertIn('split', segments.columns)
             self.assertGreater(segments['segment_label'].sum(), 0)
-            self.assertTrue(unrecognized.empty)
-            self.assertTrue(unrecognized_points.empty)
-            self.assertEqual(manifest['status'], 'SUCCEEDED')
+            progress_database = sqlite3.connect(segment_dir / 'data' / 'segment_progress.sqlite')
+            try:
+                progress_count = progress_database.execute('SELECT COUNT(*) FROM segments').fetchone()[0]
+            finally:
+                progress_database.close()
+            self.assertEqual(progress_count, len(segments))
+            self.assertEqual(json.loads((segment_dir / 'manifest.json').read_text(encoding='utf-8'))['status'], 'SUCCEEDED')
             self.assertFalse((base / '.cafad-run.lock').exists())
-            counters = pd.read_csv(base / 'data' / 'record_counter.csv')
-            self.assertEqual(counters.to_dict('records'), [
-                {'dataset': 'preprocessed_data_fixture', 'module': 'preprocess', 'counter': 1, 'state': 'success'},
-                {'dataset': 'preprocessed_data_fixture', 'module': 'split', 'counter': 1, 'state': 'success'},
-                {'dataset': 'preprocessed_data_fixture', 'module': 'inject', 'counter': 1, 'state': 'success'},
-                {'dataset': 'preprocessed_data_fixture', 'module': 'segment', 'counter': 1, 'state': 'success'},
+            database = sqlite3.connect(base / 'data' / 'runs.sqlite')
+            try:
+                counters = database.execute(
+                    'SELECT dataset, module, counter, state FROM runs ORDER BY counter'
+                ).fetchall()
+            finally:
+                database.close()
+            self.assertEqual(counters, [
+                ('preprocessed_data_fixture', 'preprocess', 1, 'success'),
+                ('preprocessed_data_fixture', 'split', 1, 'success'),
+                ('preprocessed_data_fixture', 'segment', 1, 'success'),
+                ('preprocessed_data_fixture', 'group', 1, 'success'),
+                ('preprocessed_data_fixture', 'inject', 1, 'success'),
             ])
             registry = json.loads((base / 'run_registry.json').read_text(encoding='utf-8'))
             self.assertTrue(all(item['state'] == 'success' for item in registry['runs']))
             logs = sorted((base / 'logs').glob('*#preprocessed_data_fixture#*.log'))
-            self.assertEqual(len(logs), 4)
+            self.assertEqual(len(logs), 5)
             for log in logs:
                 lines = log.read_text(encoding='utf-8').splitlines()
                 self.assertIn('运行开始时间：', lines[0])
@@ -193,10 +216,14 @@ class DataModulePipelineTests(unittest.TestCase):
                     '--altitude-unit', 'm', '--speed-unit', 'm/s', '--heading-unit', 'deg',
                 ])
             self.assertEqual(status, 1)
-            counters = pd.read_csv(base / 'data' / 'record_counter.csv')
-            self.assertEqual(counters.to_dict('records'), [
-                {'dataset': 'preprocessed_data_broken', 'module': 'preprocess', 'counter': 1, 'state': 'failure'},
-            ])
+            database = sqlite3.connect(base / 'data' / 'runs.sqlite')
+            try:
+                counters = database.execute(
+                    'SELECT dataset, module, counter, state FROM runs'
+                ).fetchall()
+            finally:
+                database.close()
+            self.assertEqual(counters, [('preprocessed_data_broken', 'preprocess', 1, 'failure')])
             registry = json.loads((base / 'run_registry.json').read_text(encoding='utf-8'))
             self.assertEqual(registry['runs'][0]['state'], 'failure')
             log = next((base / 'logs').glob('*#preprocessed_data_broken#preprocess#1_42.log'))
