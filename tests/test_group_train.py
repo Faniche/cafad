@@ -9,6 +9,7 @@ import pandas as pd
 
 from src.app.tables import read_table
 from src.modules.group.api import _assign, _references, build_parser
+from src.modules.group.merge import merge_hard_cells
 from src.modules.segment.hard_rules import HardSegmentConfig, assign_cells, segment_observations
 
 
@@ -48,7 +49,29 @@ class HardSegmentGroupTests(unittest.TestCase):
     def test_group_parser_exposes_only_reference_constraints(self) -> None:
         values = build_parser().parse_args(['--input', 'segment.json'])
         self.assertEqual((values.min_group_members, values.min_reference_flights), (2, 2))
+        self.assertEqual((values.merge_target_members, values.merge_target_reference_flights), (8, 4))
+        self.assertEqual((values.merge_max_time_buckets, values.merge_max_grid_cells), (2, 3))
         self.assertFalse(hasattr(values, 'min_cluster_sizes'))
+
+    def test_sparse_neighbor_cells_merge_but_remote_or_other_height_cells_do_not(self) -> None:
+        """合并仅沿同高度层的相邻基础网格进行，未满足最低支持的孤立单元被保留为排除映射。"""
+        normal = pd.DataFrame({
+            'segment_id': ['a', 'b', 'c', 'd'], 'flight_id': ['A', 'B', 'C', 'D'], 'ordinal': [0, 0, 0, 0],
+            'cell_key': ['h2_t0_x0_y0', 'h2_t0_x1_y0', 'h2_t4_x0_y0', 'h1_t0_x0_y0'],
+            'height_band': [2, 2, 2, 1], 'time_bucket': [0, 0, 4, 0],
+            'longitude_cell': [0, 1, 0, 0], 'latitude_cell': [0, 0, 0, 0],
+        })
+        cell_groups, groups, events = merge_hard_cells(
+            normal, minimum_members=2, minimum_flights=2, target_members=4, target_flights=4,
+            max_time_buckets=2, max_grid_cells=2,
+        )
+        self.assertEqual(len(events), 1)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups.iloc[0]['base_cells'], 2)
+        mapped = cell_groups.set_index('cell_key')['group_id']
+        self.assertEqual(mapped['h2_t0_x0_y0'], mapped['h2_t0_x1_y0'])
+        self.assertTrue(pd.isna(mapped['h2_t4_x0_y0']))
+        self.assertTrue(pd.isna(mapped['h1_t0_x0_y0']))
 
 
 def _observations() -> pd.DataFrame:

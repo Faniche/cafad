@@ -24,17 +24,20 @@ def upstream(path: Path, module: str) -> Path:
     return matches[0]
 
 
-def _routing_pairs(targets: pd.DataFrame, groups: pd.DataFrame) -> pd.DataFrame:
-    """优先精确命中同一硬单元；未知单元才交给全部专家的稳健回退评分。"""
+def _routing_pairs(targets: pd.DataFrame, groups: pd.DataFrame, cell_groups: pd.DataFrame) -> pd.DataFrame:
+    """优先经基础单元映射命中合并专家；未知单元才交给全部专家稳健回退。"""
     available = set(groups['group_id'].astype(str))
     all_groups = sorted(available)
     if not all_groups:
         raise ValueError('没有已训练的硬时空专家可供评分')
+    mapping = (cell_groups.loc[cell_groups['group_id'].notna(), ['cell_key', 'group_id']]
+               .set_index('cell_key')['group_id'].astype(str).to_dict())
     rows: list[dict[str, object]] = []
     for target in targets.itertuples(index=False):
         cell_key = str(target.cell_key)
-        candidates = [cell_key] if cell_key in available else all_groups
-        mode = 'hard_exact' if cell_key in available else 'fallback_all_groups'
+        group_id = mapping.get(cell_key)
+        candidates = [group_id] if group_id in available else all_groups
+        mode = 'hard_exact' if group_id in available else 'fallback_all_groups'
         rows.extend({'segment_id': str(target.segment_id), 'group_id': group_id, 'distance': 0.0,
                      'route_mode': mode} for group_id in candidates)
     return pd.DataFrame(rows)
@@ -55,7 +58,9 @@ def score_partition(trained: Path, split: str, gpus: str,
         raise ValueError(f'{split} 分区没有片段')
     sequences, _ = (_load_sequences_from_data(source_data) if target_data is not None else _load_sequences(segmented, injected))
     groups = read_table(grouped.parent / 'data', 'groups', columns=['group_id'], keep_default_na=False)
-    pairs = _routing_pairs(targets, groups)
+    cell_groups = read_table(grouped.parent / 'data', 'cell_group_map', columns=['cell_key', 'group_id'],
+                             keep_default_na=False, dtype={'cell_key': 'string', 'group_id': 'string'})
+    pairs = _routing_pairs(targets, groups, cell_groups)
     scores = score_pairs(pairs, sequences, trained.parent, _devices(gpus), workers, task_size, logger)
     fused: list[dict[str, object]] = []
     for segment_id, frame in scores.groupby('segment_id', sort=False):
