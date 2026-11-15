@@ -1,6 +1,6 @@
 {
-  "study_name": "d1_random20_tpe_bf16_v3",
-  "group_manifest": "data/4_group/preprocessed_data_d1/4#20261109_005829#42/manifest.json",
+  "study_name": "d1_random20_tpe_bf16_v4",
+  "inject_manifest": "",
   "random_trials": 20,
   "tpe_trials": 20,
   "search_seed": 20261109,

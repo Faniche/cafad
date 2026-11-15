@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 from pathlib import Path
 import tempfile
 import unittest
+import sqlite3
 
 from src.app.module_catalog import MODULE_SEQUENCE, artifact_module_directory
 from src.app.run_registry import DatasetIdentity, allocate_run, identify_dataset, update_run_state
@@ -17,12 +17,12 @@ class RunRegistryTests(unittest.TestCase):
     def test_module_catalog_has_the_fixed_pipeline_order_and_directories(self) -> None:
         """磁盘目录编号只来自唯一目录表，不能由各模块自行决定。"""
         self.assertEqual(MODULE_SEQUENCE, (
-            'preprocess', 'split', 'inject', 'segment', 'group',
+            'preprocess', 'split', 'segment', 'group', 'inject',
             'train', 'calibrate', 'detect', 'evaluate',
         ))
         self.assertEqual(
             tuple(artifact_module_directory(name) for name in MODULE_SEQUENCE),
-            ('0_preprocess', '1_split', '2_inject', '3_segment', '4_group',
+            ('0_preprocess', '1_split', '2_segment', '3_group', '4_inject',
              '5_train', '6_calibrate', '7_detect', '8_evaluate'),
         )
     """验证每个数据集模块组合单独递增，并始终写回最终状态。"""
@@ -47,11 +47,16 @@ class RunRegistryTests(unittest.TestCase):
             second = allocate_run(root, dataset, 'preprocess', seed=11)
             update_run_state(root, second, 'failure')
 
-            with (root / 'data' / 'record_counter.csv').open('r', encoding='utf-8', newline='') as reader:
-                rows = list(csv.DictReader(reader))
+            database = sqlite3.connect(root / 'data' / 'runs.sqlite')
+            try:
+                rows = database.execute(
+                    'SELECT dataset, module, counter, state FROM runs ORDER BY counter'
+                ).fetchall()
+            finally:
+                database.close()
             self.assertEqual(rows, [
-                {'dataset': 'preprocessed_data_d1', 'module': 'preprocess', 'counter': '1', 'state': 'success'},
-                {'dataset': 'preprocessed_data_d1', 'module': 'preprocess', 'counter': '2', 'state': 'failure'},
+                ('preprocessed_data_d1', 'preprocess', 1, 'success'),
+                ('preprocessed_data_d1', 'preprocess', 2, 'failure'),
             ])
             registry = json.loads((root / 'run_registry.json').read_text(encoding='utf-8'))
             self.assertEqual([entry['run_id'] for entry in registry['runs']], ['1', '2'])

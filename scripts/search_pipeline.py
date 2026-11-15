@@ -81,7 +81,7 @@ def run_module(root: Path, module: str, source: Path, options: dict[str, object]
 
 def pipeline(root: Path, config: dict, parameters: dict, directory: Path, logger: logging.Logger) -> float:
     """每组四步全部完成后返回验证片段 F1，中间清单实时落盘。"""
-    source = root / config['group_manifest']
+    source = root / config['inject_manifest']
     links = {}
     steps = [('train', {**config['train_fixed'], **parameters, 'gpus': config['gpus']}),
              ('calibrate', {**config['calibrate'], 'gpus': config['gpus']}),

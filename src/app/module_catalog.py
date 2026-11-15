@@ -5,9 +5,9 @@ from __future__ import annotations
 MODULE_SEQUENCE = (
     'preprocess',
     'split',
-    'inject',
     'segment',
     'group',
+    'inject',
     'train',
     'calibrate',
     'detect',

@@ -1,0 +1,335 @@
+{
+  "created_at_utc": "2026-10-29T06:04:14.149541+00:00",
+  "selection_date": "2026-10-29",
+  "source_policy": "Read-only originals; copied/extracted code only, no data generation or training.",
+  "files": [
+    {
+      "destination": "noise_provenance.py",
+      "source": "Z:\\plane\\cafad\\noise_provenance.py",
+      "source_sha256": "58b1c5f81a89e739f8731465d71416fcaf9c7c08e14eb7e717205183830884ab",
+      "destination_sha256": "58b1c5f81a89e739f8731465d71416fcaf9c7c08e14eb7e717205183830884ab",
+      "mode": "byte_identical_copy",
+      "role": "Exact positional synthetic-injection annotation utilities"
+    },
+    {
+      "destination": "legacy_plane/data.py",
+      "source": "Z:\\plane\\cafad\\data.py",
+      "source_sha256": "c1e90fd2f48492f0a4786e505e530778d27924507b07e1f48b11c5bbc256ea9b",
+      "destination_sha256": "c1e90fd2f48492f0a4786e505e530778d27924507b07e1f48b11c5bbc256ea9b",
+      "mode": "byte_identical_copy",
+      "role": "Historical preparation, approximate phases and peer retrieval"
+    },
+    {
+      "destination": "legacy_plane/synthetic_five_data.py",
+      "source": "Z:\\plane\\cafad\\synthetic_five_data.py",
+      "source_sha256": "8b033d6e8984cd38e1222f93f5593447cd54d5787926f2233eccf55f094f5c55",
+      "destination_sha256": "8b033d6e8984cd38e1222f93f5593447cd54d5787926f2233eccf55f094f5c55",
+      "mode": "byte_identical_copy",
+      "role": "Historical paired-scenario generation and injection ledger"
+    },
+    {
+      "destination": "legacy_plane/motion_inputs.py",
+      "source": "Z:\\plane\\cafad\\motion_inputs.py",
+      "source_sha256": "c73023406d1ed488d35dcd398fc6c956360ee90c5c57698cdb32b540ce8fdf41",
+      "destination_sha256": "c73023406d1ed488d35dcd398fc6c956360ee90c5c57698cdb32b540ce8fdf41",
+      "mode": "byte_identical_copy",
+      "role": "Optional historical motion-consistency adapter"
+    },
+    {
+      "destination": "sampling.py",
+      "source": "Z:\\plane\\cafad\\data.py",
+      "source_sha256": "c1e90fd2f48492f0a4786e505e530778d27924507b07e1f48b11c5bbc256ea9b",
+      "destination_sha256": "2366adf7b35eb52fd8f6d1ec1cdce0eb2ca332c0dc01940698953f678bcd950a",
+      "mode": "function_extraction",
+      "functions": [
+        {
+          "source": "_sample_observed_times",
+          "destination": "sample_observed_times",
+          "source_line": 106
+        }
+      ],
+      "changes": "Public function naming and formatting only; existing algorithm retained."
+    },
+    {
+      "destination": "anchors.py",
+      "source": "Z:\\plane\\cafad\\data.py",
+      "source_sha256": "c1e90fd2f48492f0a4786e505e530778d27924507b07e1f48b11c5bbc256ea9b",
+      "destination_sha256": "721bd9df40a9e2c0c49105d7d28c005dd293a883e625fd3f973c7086f6c757dd",
+      "mode": "function_extraction",
+      "functions": [
+        {
+          "source": "_wrap_heading",
+          "destination": "wrap_heading",
+          "source_line": 146
+        },
+        {
+          "source": "_distance",
+          "destination": "anchor_distance",
+          "source_line": 150
+        },
+        {
+          "source": "_anchor_clusters",
+          "destination": "cluster_anchors",
+          "source_line": 157
+        }
+      ],
+      "changes": "Public function naming and formatting only; DBSCAN optional dependencies imported inside cluster_anchors."
+    },
+    {
+      "destination": "legacy_plane/phase_segmentation.py",
+      "source": "Z:\\plane\\cafad\\data.py",
+      "source_sha256": "c1e90fd2f48492f0a4786e505e530778d27924507b07e1f48b11c5bbc256ea9b",
+      "destination_sha256": "0a0d00e423bbd5bc60362c577f96983d1c7c744d6ced44862985f3e1c799256f",
+      "mode": "function_extraction",
+      "functions": [
+        {
+          "source": "_runs",
+          "destination": "_runs",
+          "source_line": 101
+        },
+        {
+          "source": "_phase_ranges",
+          "destination": "phase_ranges_vertical_rate",
+          "source_line": 117
+        }
+      ],
+      "changes": "Public function naming and formatting only; existing algorithm retained."
+    }
+  ],
+  "reviewed_local_candidates": [
+    {
+      "path": "data/data/code_noise_new_1/code/data_preprocessing.py",
+      "sha256": "a9625d76c52887bf165196016aa70f36f005e63b8c2ac475888af2cb42d6767f",
+      "decision": "not_copied",
+      "reason": "Requires redesign of central-window outlier test and fixed-step smoothing."
+    },
+    {
+      "path": "data/data/code_noise_new_1/code/draw.py",
+      "sha256": "5307f2c535a980b2ea8a40a655b3f770cc6e7e91f49a85102f17426a0f2d71fe",
+      "decision": "not_copied",
+      "reason": "Ad-hoc statistics, plotting, conversion or inspection; not a reusable preprocessing core."
+    },
+    {
+      "path": "data/data/code_noise_new_1/code/label_engineering.py",
+      "sha256": "21ceca73771a7c0aabf26803f5ff6311db7ed0c0ebb1ec72f168a1f44184e4fc",
+      "decision": "not_copied",
+      "reason": "Timestamp label matching and whole-group scaling are incompatible with the intended pipeline."
+    },
+    {
+      "path": "data/data/code_noise_new_1/code/noise_adder.py",
+      "sha256": "ea3641b960214b08a45a4e0977514bb1e1712b0548f8e0afb24ab691aeeee4ca",
+      "decision": "not_copied",
+      "reason": "Historical TensorFlow/NumPy generator without recoverable fixed RNG configuration; prefer isolated recorded generator."
+    },
+    {
+      "path": "data/data/code_noise_new_1/code/plot.py",
+      "sha256": "1d0e0b927b2e43bc4c0117aeb92a73581be444361c51c450eea42ece8c5877f5",
+      "decision": "not_copied",
+      "reason": "Ad-hoc statistics, plotting, conversion or inspection; not a reusable preprocessing core."
+    },
+    {
+      "path": "data/data/code_noise_new_1/code/statistic.py",
+      "sha256": "8afc2c3bc40aef9cb2954714a7720a70e2593fc50526935df872cb73dcca1a5b",
+      "decision": "not_copied",
+      "reason": "Ad-hoc statistics, plotting, conversion or inspection; not a reusable preprocessing core."
+    },
+    {
+      "path": "data/data/code_noise_new_1/code/test.py",
+      "sha256": "83e055943fa9bc84a5828fa9e496a02d131f94a9f592385e7344c429b057e626",
+      "decision": "not_copied",
+      "reason": "Ad-hoc statistics, plotting, conversion or inspection; not a reusable preprocessing core."
+    },
+    {
+      "path": "data/data/code_noise_new_2/code/data_preprocessing.py",
+      "sha256": "66978de8f6ac7ed2ebd6afabb1b4a5545890410c37587e7fd51b4a654ff93e56",
+      "decision": "not_copied",
+      "reason": "Requires redesign of central-window outlier test and fixed-step smoothing."
+    },
+    {
+      "path": "data/data/code_noise_new_2/code/draw.py",
+      "sha256": "5307f2c535a980b2ea8a40a655b3f770cc6e7e91f49a85102f17426a0f2d71fe",
+      "decision": "not_copied",
+      "reason": "Ad-hoc statistics, plotting, conversion or inspection; not a reusable preprocessing core."
+    },
+    {
+      "path": "data/data/code_noise_new_2/code/label_engineering.py",
+      "sha256": "0c704d7f4b21af1b69722c7c94ff78d3f757a1542b760f5eb90d94c4469af609",
+      "decision": "not_copied",
+      "reason": "Timestamp label matching and whole-group scaling are incompatible with the intended pipeline."
+    },
+    {
+      "path": "data/data/code_noise_new_2/code/noise_adder.py",
+      "sha256": "ff06a6874c1e4238f3d2cbfb83d9bef1c6387c78bd49ff4cb8faf90688f7b2a0",
+      "decision": "not_copied",
+      "reason": "Historical TensorFlow/NumPy generator without recoverable fixed RNG configuration; prefer isolated recorded generator."
+    },
+    {
+      "path": "data/data/code_noise_new_2/code/statistic.py",
+      "sha256": "cb9902d177bd5a7563c1a04ced2bdee142ef93c3d1e0fc396ee8d7a6660cf91e",
+      "decision": "not_copied",
+      "reason": "Ad-hoc statistics, plotting, conversion or inspection; not a reusable preprocessing core."
+    },
+    {
+      "path": "data/data/code_noise_new_2/code/test.py",
+      "sha256": "7b690438d21e9c436aca5b2a5b86172bedbd393e10a65746e525b3166a6b3692",
+      "decision": "not_copied",
+      "reason": "Ad-hoc statistics, plotting, conversion or inspection; not a reusable preprocessing core."
+    },
+    {
+      "path": "data/data/code_noise_new_3/code/data_preprocessing.py",
+      "sha256": "364944ba6aa4d32546c50bad512af7dbe365b9e497ef542b100732a6b5aa4655",
+      "decision": "not_copied",
+      "reason": "Requires redesign of central-window outlier test and fixed-step smoothing."
+    },
+    {
+      "path": "data/data/code_noise_new_3/code/draw.py",
+      "sha256": "5307f2c535a980b2ea8a40a655b3f770cc6e7e91f49a85102f17426a0f2d71fe",
+      "decision": "not_copied",
+      "reason": "Ad-hoc statistics, plotting, conversion or inspection; not a reusable preprocessing core."
+    },
+    {
+      "path": "data/data/code_noise_new_3/code/label_engineering.py",
+      "sha256": "337eb3204a8047c30cb691de380d94582dfa6d619906f4d9ae22ab29fe760be9",
+      "decision": "not_copied",
+      "reason": "Timestamp label matching and whole-group scaling are incompatible with the intended pipeline."
+    },
+    {
+      "path": "data/data/code_noise_new_3/code/noise_adder.py",
+      "sha256": "7928b4c28f34c0c0819c25409ecfdf5c3fdb49fad15798fea893c7203d158053",
+      "decision": "not_copied",
+      "reason": "Historical TensorFlow/NumPy generator without recoverable fixed RNG configuration; prefer isolated recorded generator."
+    },
+    {
+      "path": "data/data/code_noise_new_3/code/statistic.py",
+      "sha256": "a930050275fa9a5affddb7a6e914d8fc84133a201b2b071e7dcee8b9ea40cea6",
+      "decision": "not_copied",
+      "reason": "Ad-hoc statistics, plotting, conversion or inspection; not a reusable preprocessing core."
+    },
+    {
+      "path": "data/data/code_noise_new_3/code/test.py",
+      "sha256": "83e055943fa9bc84a5828fa9e496a02d131f94a9f592385e7344c429b057e626",
+      "decision": "not_copied",
+      "reason": "Ad-hoc statistics, plotting, conversion or inspection; not a reusable preprocessing core."
+    },
+    {
+      "path": "data/data/code_noise_new_4/code/data_preprocessing.py",
+      "sha256": "7161ce8d4063ccd123896d4d8d176a08e29476d19c9defa349389b934c8fa0e7",
+      "decision": "not_copied",
+      "reason": "Requires redesign of central-window outlier test and fixed-step smoothing."
+    },
+    {
+      "path": "data/data/code_noise_new_4/code/draw.py",
+      "sha256": "5307f2c535a980b2ea8a40a655b3f770cc6e7e91f49a85102f17426a0f2d71fe",
+      "decision": "not_copied",
+      "reason": "Ad-hoc statistics, plotting, conversion or inspection; not a reusable preprocessing core."
+    },
+    {
+      "path": "data/data/code_noise_new_4/code/label_engineering.py",
+      "sha256": "9cfd68514578429674619f1302637d59055c86c9f808b0ae7cc17b9004f867ff",
+      "decision": "not_copied",
+      "reason": "Timestamp label matching and whole-group scaling are incompatible with the intended pipeline."
+    },
+    {
+      "path": "data/data/code_noise_new_4/code/noise_adder.py",
+      "sha256": "2c54d42a98bd0c1d636ff3a3f80ee544d41cd6255c15d39f55439b76e47041d4",
+      "decision": "not_copied",
+      "reason": "Historical TensorFlow/NumPy generator without recoverable fixed RNG configuration; prefer isolated recorded generator."
+    },
+    {
+      "path": "data/data/code_noise_new_4/code/statistic.py",
+      "sha256": "7f698f6a248aacc86e1edfef91e020295296a34789f4a7e214a4f4a6ff8f0672",
+      "decision": "not_copied",
+      "reason": "Ad-hoc statistics, plotting, conversion or inspection; not a reusable preprocessing core."
+    },
+    {
+      "path": "data/data/code_noise_new_4/code/test.py",
+      "sha256": "83e055943fa9bc84a5828fa9e496a02d131f94a9f592385e7344c429b057e626",
+      "decision": "not_copied",
+      "reason": "Ad-hoc statistics, plotting, conversion or inspection; not a reusable preprocessing core."
+    },
+    {
+      "path": "data/data/code_noise_new_5/code/data_preprocessing.py",
+      "sha256": "4add5eeb892478596887bfadd9bfb6c406b04d4c47a18630872b95247b350d82",
+      "decision": "not_copied",
+      "reason": "Requires redesign of central-window outlier test and fixed-step smoothing."
+    },
+    {
+      "path": "data/data/code_noise_new_5/code/draw.py",
+      "sha256": "5307f2c535a980b2ea8a40a655b3f770cc6e7e91f49a85102f17426a0f2d71fe",
+      "decision": "not_copied",
+      "reason": "Ad-hoc statistics, plotting, conversion or inspection; not a reusable preprocessing core."
+    },
+    {
+      "path": "data/data/code_noise_new_5/code/label_engineering.py",
+      "sha256": "646a240768a4b0867934a172cae91b07cdb5cc519fc90a4687f16286b9e73742",
+      "decision": "not_copied",
+      "reason": "Timestamp label matching and whole-group scaling are incompatible with the intended pipeline."
+    },
+    {
+      "path": "data/data/code_noise_new_5/code/noise_adder.py",
+      "sha256": "954740e3529d4ac00443b1e73286d81faa413112e4ffa5ba789f6a99cc3cbbca",
+      "decision": "not_copied",
+      "reason": "Historical TensorFlow/NumPy generator without recoverable fixed RNG configuration; prefer isolated recorded generator."
+    },
+    {
+      "path": "data/data/code_noise_new_5/code/statistic.py",
+      "sha256": "afa272df1ff0323a22fbe547c0371dc3ffa0d286a312e6c4c698f09722f739ab",
+      "decision": "not_copied",
+      "reason": "Ad-hoc statistics, plotting, conversion or inspection; not a reusable preprocessing core."
+    },
+    {
+      "path": "data/data/code_noise_new_5/code/test.py",
+      "sha256": "83e055943fa9bc84a5828fa9e496a02d131f94a9f592385e7344c429b057e626",
+      "decision": "not_copied",
+      "reason": "Ad-hoc statistics, plotting, conversion or inspection; not a reusable preprocessing core."
+    },
+    {
+      "path": "data/data/code_uavDATA_process/test.py",
+      "sha256": "895f25da631f765b74ce807e0b1714920b43228e8d12ae87cf64fba32412acb8",
+      "decision": "not_copied",
+      "reason": "Ad-hoc statistics, plotting, conversion or inspection; not a reusable preprocessing core."
+    },
+    {
+      "path": "data/data/code_uavDATA_process/uav_dataprocess.py",
+      "sha256": "29df42feddb104d97263495a4fb115c7974998e24d0a2358d5d7d99ddf035426",
+      "decision": "not_copied",
+      "reason": "Scaling before role split and last-point window target differ from any-point segment target."
+    },
+    {
+      "path": "data/data/code_uavDATA_process2/excel.py",
+      "sha256": "392c9a2cea72c62bdf1caa57593f718090fcc3ecc7a7cc1e0cb0037591698375",
+      "decision": "not_copied",
+      "reason": "Ad-hoc statistics, plotting, conversion or inspection; not a reusable preprocessing core."
+    },
+    {
+      "path": "data/data/code_uavDATA_process2/statistic.py",
+      "sha256": "afa272df1ff0323a22fbe547c0371dc3ffa0d286a312e6c4c698f09722f739ab",
+      "decision": "not_copied",
+      "reason": "Ad-hoc statistics, plotting, conversion or inspection; not a reusable preprocessing core."
+    },
+    {
+      "path": "data/data/code_uavDATA_process2/test.py",
+      "sha256": "ed9e9925f15f678ac1bfdb8ae99f0bd85713e1e68444471fbd375836087e6a4b",
+      "decision": "not_copied",
+      "reason": "Ad-hoc statistics, plotting, conversion or inspection; not a reusable preprocessing core."
+    },
+    {
+      "path": "data/data/code_uavDATA_process2/uav_dataprocess.py",
+      "sha256": "a90344e0a0b3700b24802472a81d328a9e1e77ddcc144924b576fd37b639dc04",
+      "decision": "not_copied",
+      "reason": "Scaling before role split and last-point window target differ from any-point segment target."
+    },
+    {
+      "path": "data/程序2、3/程序2、3/plot_fig2_standalone.py",
+      "sha256": "9ec4e904e250e37bd52c72a590ab99329f53277c10c6774f8c4c9a23e8fb92aa",
+      "decision": "not_copied",
+      "reason": "Ad-hoc statistics, plotting, conversion or inspection; not a reusable preprocessing core."
+    },
+    {
+      "path": "data/程序2、3/程序2、3/plot_fig3_standalone.py",
+      "sha256": "fb94e2e8a2df64f9702379b33239c72b9960373d388d65bb10715709480f085c",
+      "decision": "not_copied",
+      "reason": "Ad-hoc statistics, plotting, conversion or inspection; not a reusable preprocessing core."
+    }
+  ]
+}

@@ -6,6 +6,7 @@ from unittest.mock import patch
 import json
 import numpy as np
 import pandas as pd
+from src.app.tables import read_table, write_table
 from src.modules.calibrate.threshold import select_segment_threshold
 from src.modules.detect.fusion import fallback_score, fuse_candidates, make_predictions
 
@@ -19,27 +20,29 @@ class DetectionTests(unittest.TestCase):
             (root / '.env').write_text('nproc=2\ndata_proc_usage=100%\n', encoding='utf-8')
             trained = root / 'train.json'
             trained.write_text(json.dumps({'status': 'SUCCEEDED', 'module': 'train', 'dataset_id': 'fixture',
-                                           'dataset_name': 'fixture', 'outputs': [], 'dependencies': [{'manifest': str(root / 'group.json')}]}), encoding='utf-8')
-            for module, parent in (('group', 'segment'), ('segment', None)):
+                                           'dataset_name': 'fixture', 'outputs': [], 'dependencies': [{'manifest': str(root / 'inject.json')}]}), encoding='utf-8')
+            for module, parent in (('inject', 'group'), ('group', 'segment'), ('segment', 'split'), ('split', 'preprocess'), ('preprocess', None)):
                 (root / f'{module}.json').write_text(json.dumps({'status': 'SUCCEEDED', 'module': module,
                     'outputs': [], 'dependencies': [{'manifest': str(root / f'{parent}.json')}] if parent else []}), encoding='utf-8')
             (root / 'data').mkdir()
-            pd.DataFrame({'segment_id': ['a', 'b'], 'segment_label': [0, 1], 'flight_id': ['f1', 'f1'],
-                          'phase': ['CR', 'CR'], 'split': ['test', 'test']}).to_csv(root / 'data/segments.csv', index=False)
+            write_table(pd.DataFrame({'segment_id': ['a', 'b'], 'segment_label': [0, 1], 'flight_id': ['f1', 'f1'],
+                                      'phase': ['CR', 'CR'], 'split': ['test', 'test']}), root / 'data', 'segments')
             scores = pd.DataFrame({'segment_id': ['a', 'b'], 'flight_id': ['f1', 'f1'], 'phase': ['CR', 'CR'],
-                                   'split': ['val', 'val'], 'score': [.2, .8], 'route_mode': ['same_phase', 'same_phase']})
+                                   'split': ['val', 'val'], 'segment_label': [0, 1], 'score': [.2, .8],
+                                   'route_mode': ['same_phase', 'same_phase']})
             pairs = pd.DataFrame({'segment_id': ['a', 'b'], 'group_id': ['g0', 'g0'], 'score': [.2, .8]})
             with patch.object(PathUtils, 'get_project_root', return_value=root):
                 with patch('src.modules.calibrate.api.score_partition', return_value=(scores, pairs, root / 'segment.json')):
                     self.assertEqual(main(['-m', 'calibrate', '--input', str(trained)]), 0)
                 calibrated = next((root / 'data/6_calibrate/fixture').iterdir()) / 'manifest.json'
                 scores['split'] = 'test'
-                with patch('src.modules.detect.api.score_partition', return_value=(scores, pairs, root / 'segment.json')):
+                with patch('src.modules.detect.api._test_segmentation', return_value={'segments': 2}), \
+                     patch('src.modules.detect.api.score_partition', return_value=(scores, pairs, root / 'segment.json')):
                     self.assertEqual(main(['-m', 'detect', '--input', str(calibrated)]), 0)
                 detected_manifest = next((root / 'data/7_detect/fixture').iterdir()) / 'manifest.json'
                 self.assertEqual(main(['-m', 'evaluate', '--input', str(detected_manifest)]), 0)
             detected = next((root / 'data/7_detect/fixture').iterdir())
-            result = pd.read_csv(detected / 'data/flight_predictions.csv')
+            result = read_table(detected / 'data', 'flight_predictions')
             self.assertEqual(result.prediction.tolist(), [1])
 
     def test_threshold_and_single_class(self) -> None:

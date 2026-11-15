@@ -1,0 +1,7 @@
+# Install into this project's .venv, not system Python.
+numpy>=2.0
+pandas>=2.2
+scipy>=1.13
+h5py>=3.10
+# Only used for inspecting the official field dictionaries.
+pypdf>=5.0

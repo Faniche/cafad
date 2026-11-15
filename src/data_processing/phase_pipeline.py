@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, wait
+from contextlib import closing
 from src.utils.process_pool import InterruptibleProcessPoolExecutor as ProcessPoolExecutor
 from dataclasses import asdict, dataclass
 import hashlib
@@ -13,6 +14,7 @@ import multiprocessing as mp
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 from statistics import fmean, median
 import tempfile
 import time
@@ -39,7 +41,9 @@ NATIVE_THREAD_KEYS = ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREAD
                       'NUMEXPR_NUM_THREADS', 'BLIS_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS')
 POINT_COLUMNS = ['source_row_index', 'flight_id', 'icao', 'call', 'time_ns', 'phase', 'segment_id']
 SEGMENT_COLUMNS = ['segment_id', 'flight_id', 'icao', 'call', 'ordinal', 'phase', 'points', 'start_time',
-                   'end_time', 'first_source_row_index', 'last_source_row_index']
+                   'end_time', 'duration_seconds', 'start_longitude_deg', 'start_latitude_deg',
+                   'end_longitude_deg', 'end_latitude_deg', 'span_km', 'start_altitude_m', 'end_altitude_m',
+                   'first_source_row_index', 'last_source_row_index']
 FLIGHT_COLUMNS = ['flight_id', 'icao', 'call', 'points', 'phase_types', 'duplicate_time_points',
                   'unique_time_points', 'start_time', 'end_time', 'worker_pid', 'seconds', 'segments',
                   'phase_counts']
@@ -206,6 +210,47 @@ def _iso(timestamp_ns: int) -> str:
     return pd.Timestamp(int(timestamp_ns), tz='UTC').isoformat()
 
 
+def _span_km(task: FlightTask, start: int, end: int) -> float | None:
+    """返回片段首末点球面直线距离；缺失位置时不伪造数值。"""
+    if task.longitude is None or task.latitude is None:
+        return None
+    latitude = np.deg2rad([task.latitude[start], task.latitude[end - 1]])
+    longitude = np.deg2rad([task.longitude[start], task.longitude[end - 1]])
+    value = np.sin((latitude[1] - latitude[0]) / 2) ** 2
+    value += np.cos(latitude[0]) * np.cos(latitude[1]) * np.sin((longitude[1] - longitude[0]) / 2) ** 2
+    return float(6371.0088 * 2 * np.arcsin(np.sqrt(value)))
+
+
+def _progress_database(path: Path) -> sqlite3.Connection:
+    """创建阶段进度数据库；仅父进程持有该连接并串行写入。"""
+    database = sqlite3.connect(path)
+    database.execute('PRAGMA journal_mode=WAL')
+    database.execute('''CREATE TABLE IF NOT EXISTS segments (
+        segment_id TEXT PRIMARY KEY, flight_id TEXT NOT NULL, icao TEXT NOT NULL, call TEXT NOT NULL,
+        phase TEXT NOT NULL, points INTEGER NOT NULL, start_time TEXT NOT NULL, end_time TEXT NOT NULL,
+        duration_seconds REAL NOT NULL, start_longitude_deg REAL, start_latitude_deg REAL,
+        end_longitude_deg REAL, end_latitude_deg REAL, span_km REAL, start_altitude_m REAL, end_altitude_m REAL
+    )''')
+    return database
+
+
+def _write_progress(database: sqlite3.Connection, segments: list[dict]) -> None:
+    """由主进程一次提交一个航班的片段，避免工作进程并发写 SQLite。"""
+    database.executemany(
+        '''INSERT INTO segments VALUES (:segment_id, :flight_id, :icao, :call, :phase, :points, :start_time, :end_time,
+           :duration_seconds, :start_longitude_deg, :start_latitude_deg, :end_longitude_deg, :end_latitude_deg,
+           :span_km, :start_altitude_m, :end_altitude_m)''',
+        segments,
+    )
+    database.commit()
+
+
+def write_segment_progress(path: Path, segments: list[dict]) -> None:
+    """将一条航班的片段进度写入 SQLite；供其他分段器复用父进程单写入约束。"""
+    with closing(_progress_database(path)) as database:
+        _write_progress(database, segments)
+
+
 def _unrecognized_result(task: FlightTask, reason: str, workspace: str) -> dict:
     """保存单条数值不可识别轨迹的最小追溯信息，不伪造阶段或片段。"""
     def coordinate(values: np.ndarray | None, index: int) -> float | None:
@@ -261,6 +306,14 @@ def _process_flight(task: FlightTask, config: PipelineConfig, workspace: str) ->
                          'phase': str(labels[start]), 'points': int(end - start),
                          'start_time': _iso(task.timestamps_ns[start]),
                          'end_time': _iso(task.timestamps_ns[end - 1]),
+                         'duration_seconds': (int(task.timestamps_ns[end - 1]) - int(task.timestamps_ns[start])) / 1e9,
+                         'start_longitude_deg': None if task.longitude is None else float(task.longitude[start]),
+                         'start_latitude_deg': None if task.latitude is None else float(task.latitude[start]),
+                         'end_longitude_deg': None if task.longitude is None else float(task.longitude[end - 1]),
+                         'end_latitude_deg': None if task.latitude is None else float(task.latitude[end - 1]),
+                         'span_km': _span_km(task, start, end),
+                         'start_altitude_m': float(task.altitude[start]),
+                         'end_altitude_m': float(task.altitude[end - 1]),
                          'first_source_row_index': int(task.row_indices[start]),
                          'last_source_row_index': int(task.row_indices[end - 1])})
     points_path = Path(workspace) / f'points_{task.flight_id}.csv'
@@ -291,6 +344,7 @@ def _write_json(path: Path, value: dict) -> None:
 
 def process_cleaned_csv(source: str | Path, output: str | Path, config: PipelineConfig,
                         *, column_overrides: dict[str, str] | None = None,
+                        progress_database: str | Path | None = None,
                         logger: logging.Logger | None = None) -> dict:
     """Write point membership, per-flight/segment tables and aggregate statistics.
 
@@ -333,6 +387,7 @@ def process_cleaned_csv(source: str | Path, output: str | Path, config: Pipeline
                     'queue': 'ProcessPoolExecutor synchronized multiprocessing queues; bounded to 2 * workers',
                     'native_threads_per_worker': 1})
         logger.info('开始 Sun 阶段识别：workers=%d，chunk_rows=%d，buckets=%d', config.workers, config.chunk_rows, config.buckets)
+        progress_path = Path(progress_database).resolve() if progress_database is not None else output / 'segment_progress.sqlite'
         with tempfile.TemporaryDirectory(prefix='_sun_work_', dir=output) as directory:
             workspace = Path(directory)
             bucket_paths, input_points = _partition_csv(source, workspace, columns, config, logger)
@@ -340,7 +395,8 @@ def process_cleaned_csv(source: str | Path, output: str | Path, config: Pipeline
             if (current.st_size, current.st_mtime_ns) != (source_stat.st_size, source_stat.st_mtime_ns):
                 raise RuntimeError('Input CSV changed while it was being read')
             tasks = iter(_iter_flights(bucket_paths, config))
-            with (output / 'points.csv').open('w', encoding='utf-8', newline='') as points_file, \
+            with closing(_progress_database(progress_path)) as progress, \
+                 (output / 'points.csv').open('w', encoding='utf-8', newline='') as points_file, \
                  (output / 'segments.csv').open('w', encoding='utf-8', newline='') as segments_file, \
                  (output / 'flights.csv').open('w', encoding='utf-8', newline='') as flights_file, \
                  (output / 'unrecognized_flights.csv').open('w', encoding='utf-8', newline='') as unrecognized_file, \
@@ -403,6 +459,7 @@ def process_cleaned_csv(source: str | Path, output: str | Path, config: Pipeline
                             Path(result['points_path']).unlink()
                             segments = result['segments']
                             csv.DictWriter(segments_file, fieldnames=SEGMENT_COLUMNS).writerows(segments)
+                            _write_progress(progress, segments)
                             flight = {key: result[key] for key in ('flight_id', 'icao', 'call', 'points', 'phase_types',
                                       'duplicate_time_points', 'unique_time_points', 'start_time', 'end_time', 'worker_pid', 'seconds')}
                             flight['segments'] = len(segments)

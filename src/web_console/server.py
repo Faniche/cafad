@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Mapping
 from urllib.parse import parse_qs, urlparse
 
+import duckdb
+
 from src.utils.env import Env
 from src.utils.logging_utils import close_project_logging, setup_project_logging
 from src.utils.strings import PathUtils
@@ -24,7 +26,8 @@ from .train_monitor import training_progress
 from .train_util import TrainTaskQueue
 from .web_util import ModuleHistoryUtil
 from .group_view import group_result
-from .segment_view import segment_result
+from .segment_view import segment_result, update_segment_phases
+from .segment_plot import segment_flight_svg
 from .service import JobManager, build_command, module_catalog, module_schemas, serialize_schemas, upstream_manifest_choices
 
 
@@ -90,6 +93,16 @@ def _static_response(handler: BaseHTTPRequestHandler, relative_path: str, conten
     handler.send_header('Cache-Control', 'no-store')
     handler.end_headers()
     handler.wfile.write(data)
+
+
+def _svg_response(handler: BaseHTTPRequestHandler, value: bytes) -> None:
+    """返回不可缓存的阶段着色 SVG，供已登录控制台的单航班预览直接嵌入。"""
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header('Content-Type', 'image/svg+xml; charset=utf-8')
+    handler.send_header('Content-Length', str(len(value)))
+    handler.send_header('Cache-Control', 'no-store')
+    handler.end_headers()
+    handler.wfile.write(value)
 
 
 def create_handler(
@@ -186,8 +199,20 @@ def create_handler(
                 try:
                     artifact = parse_qs(parsed.query).get('artifact', [''])[0]
                     _json_response(self, HTTPStatus.OK, segment_result(project_root, artifact))
-                except (ValueError, OSError, sqlite3.Error) as exc:
+                except (ValueError, OSError, RuntimeError, sqlite3.Error) as exc:
                     _json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
+                return
+            if parsed.path == '/api/segment/flight-plot':
+                try:
+                    query = parse_qs(parsed.query)
+                    _svg_response(self, segment_flight_svg(
+                        project_root, query.get('artifact', [''])[0], query.get('flight_id', [''])[0],
+                    ))
+                except (ValueError, OSError, RuntimeError, duckdb.Error) as exc:
+                    _json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
+                return
+            if parsed.path == '/api/segment/phases':
+                _json_response(self, HTTPStatus.METHOD_NOT_ALLOWED, {'error': '请使用 POST 修改阶段标签'})
                 return
             if parsed.path == '/api/jobs/latest':
                 self._latest_job_get(parse_qs(parsed.query))
@@ -218,6 +243,23 @@ def create_handler(
                 return
             if path == '/api/server/restart':
                 self._restart()
+                return
+            if path == '/api/segment/phases':
+                if not self._authorized_response(True):
+                    return
+                if manager.has_active_job() or (train_queue is not None and train_queue.has_pending()):
+                    _json_response(self, HTTPStatus.CONFLICT, {'error': '当前有网页任务运行、停止中或排队，不能修改阶段标签'})
+                    return
+                try:
+                    payload = _read_json(self)
+                    artifact = payload.get('artifact')
+                    segment_ids = payload.get('segment_ids')
+                    phase = payload.get('phase')
+                    if not isinstance(artifact, str) or not isinstance(segment_ids, list) or not isinstance(phase, str):
+                        raise ValueError('阶段修改请求缺少 artifact、segment_ids 或 phase')
+                    _json_response(self, HTTPStatus.OK, update_segment_phases(project_root, artifact, segment_ids, phase))
+                except (ValueError, OSError, sqlite3.Error) as exc:
+                    _json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
                 return
             if path.startswith('/api/jobs/') and path.endswith('/stop'):
                 if not self._authorized_response(True):

@@ -8,6 +8,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import re
+import sqlite3
 
 from .artifacts import write_json
 from .module_catalog import artifact_module_directory
@@ -71,19 +72,27 @@ def identify_dataset(project_root: Path, module_name: str, args: argparse.Namesp
 
 
 def allocate_run(project_root: Path, dataset: DatasetIdentity, module_name: str, seed: int) -> RunAllocation:
-    """在项目锁持有期间占用一个计数器，并将运行初始状态写入两个台账。"""
+    """在项目锁持有期间以 SQLite 事务占用计数器，并同步网页历史 JSON。"""
     data_dir = project_root / 'data'
     data_dir.mkdir(parents=True, exist_ok=True)
-    counter_path = data_dir / 'record_counter.csv'
-    rows = _read_counter_rows(counter_path)
-    previous = [int(row['counter']) for row in rows
-                if row['dataset'] == dataset.dataset_id and row['module'] == module_name]
-    allocation = RunAllocation(dataset=dataset, module_name=module_name,
-                               counter=max(previous, default=0) + 1, seed=seed,
-                               started_at=datetime.now().astimezone())
-    rows.append({'dataset': dataset.dataset_id, 'module': module_name,
-                 'counter': str(allocation.counter), 'state': 'running'})
-    _write_counter_rows(counter_path, rows)
+    started_at = datetime.now().astimezone()
+    database = _run_database(data_dir)
+    try:
+        _migrate_counter_csv(data_dir, database)
+        database.execute('BEGIN IMMEDIATE')
+        counter = int(database.execute(
+            'SELECT COALESCE(MAX(counter), 0) + 1 FROM runs WHERE dataset = ? AND module = ?',
+            (dataset.dataset_id, module_name),
+        ).fetchone()[0])
+        database.execute(
+            'INSERT INTO runs(dataset, module, counter, state, seed, started_at) VALUES (?, ?, ?, ?, ?, ?)',
+            (dataset.dataset_id, module_name, counter, 'running', seed, started_at.isoformat()),
+        )
+        database.commit()
+    finally:
+        database.close()
+    allocation = RunAllocation(dataset=dataset, module_name=module_name, counter=counter, seed=seed,
+                               started_at=started_at)
     registry_path = project_root / 'run_registry.json'
     registry = _read_registry(registry_path)
     registry['runs'].append({
@@ -103,20 +112,21 @@ def allocate_run(project_root: Path, dataset: DatasetIdentity, module_name: str,
 
 
 def update_run_state(project_root: Path, allocation: RunAllocation, state: str) -> None:
-    """将已占用运行的最终成功或失败状态同步写回 CSV 与 JSON。"""
+    """将已占用运行的最终状态事务写入 SQLite，并同步网页历史 JSON。"""
     if state not in {'success', 'failure'}:
         raise ValueError('运行最终状态只能是 success 或 failure')
-    counter_path = project_root / 'data' / 'record_counter.csv'
-    rows = _read_counter_rows(counter_path)
-    matched = False
-    for row in rows:
-        if (row['dataset'] == allocation.dataset.dataset_id and row['module'] == allocation.module_name
-                and int(row['counter']) == allocation.counter):
-            row['state'] = state
-            matched = True
-    if not matched:
-        raise RuntimeError('record_counter.csv 中找不到当前运行记录')
-    _write_counter_rows(counter_path, rows)
+    database = _run_database(project_root / 'data')
+    try:
+        result = database.execute(
+            'UPDATE runs SET state = ?, ended_at = ? WHERE dataset = ? AND module = ? AND counter = ? AND started_at = ?',
+            (state, datetime.now().astimezone().isoformat(), allocation.dataset.dataset_id,
+             allocation.module_name, allocation.counter, allocation.started_at.isoformat()),
+        )
+        if result.rowcount != 1:
+            raise RuntimeError('runs.sqlite 中找不到当前运行记录')
+        database.commit()
+    finally:
+        database.close()
 
     registry_path = project_root / 'run_registry.json'
     registry = _read_registry(registry_path)
@@ -179,14 +189,31 @@ def _read_counter_rows(path: Path) -> list[dict[str, str]]:
     return rows
 
 
-def _write_counter_rows(path: Path, rows: list[dict[str, str]]) -> None:
-    """原子覆写小型 CSV 台账，避免意外中断留下半行。"""
-    temporary = path.with_suffix(path.suffix + '.tmp')
-    with temporary.open('w', encoding='utf-8', newline='') as writer:
-        table = csv.DictWriter(writer, fieldnames=RECORD_COLUMNS)
-        table.writeheader()
-        table.writerows(rows)
-    temporary.replace(path)
+def _run_database(data_dir: Path) -> sqlite3.Connection:
+    """打开运行台账 SQLite；正式运行锁保证写入者只有一个。"""
+    database = sqlite3.connect(data_dir / 'runs.sqlite')
+    database.execute('PRAGMA journal_mode=WAL')
+    database.execute('''CREATE TABLE IF NOT EXISTS runs (
+        dataset TEXT NOT NULL, module TEXT NOT NULL, counter INTEGER NOT NULL,
+        state TEXT NOT NULL, seed INTEGER, started_at TEXT NOT NULL, ended_at TEXT,
+        PRIMARY KEY(dataset, module, counter)
+    )''')
+    return database
+
+
+def _migrate_counter_csv(data_dir: Path, database: sqlite3.Connection) -> None:
+    """首次启用 SQLite 时无损导入旧计数器；旧 CSV 不再参与后续分配。"""
+    if database.execute('SELECT COUNT(*) FROM runs').fetchone()[0]:
+        return
+    legacy = data_dir / 'record_counter.csv'
+    if not legacy.is_file():
+        return
+    for row in _read_counter_rows(legacy):
+        database.execute(
+            'INSERT OR IGNORE INTO runs(dataset, module, counter, state, seed, started_at) VALUES (?, ?, ?, ?, NULL, ?)',
+            (row['dataset'], row['module'], int(row['counter']), row['state'], 'legacy'),
+        )
+    database.commit()
 
 
 def _read_registry(path: Path) -> dict[str, object]:

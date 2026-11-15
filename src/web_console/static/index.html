@@ -81,8 +81,6 @@
           <pre id="history-summary" class="history-text"></pre>
           <div id="group-result" hidden></div>
           <div id="segment-result" hidden></div>
-          <h4>日志</h4>
-          <pre id="history-logs" class="history-text"></pre>
         </div>
       </section>
 
@@ -102,6 +100,11 @@
     <p id="browser-status" class="form-status" role="status"></p>
     <div id="browser-entries" class="browser-entries" aria-live="polite"></div>
     <div class="dialog-actions"><button id="browser-select-directory" class="secondary" type="button" hidden>选择当前目录</button><button id="browser-cancel" class="secondary" type="button">取消</button></div>
+  </dialog>
+  <dialog id="flight-plot-dialog" aria-labelledby="flight-plot-title">
+    <div class="dialog-heading"><h2 id="flight-plot-title">航班三维轨迹</h2><button id="flight-plot-close" class="icon-button" type="button" aria-label="关闭三维轨迹图">×</button></div>
+    <p id="flight-plot-status" class="dialog-note"></p>
+    <img id="flight-plot-image" alt="按阶段着色的经度、纬度、几何高度三维航迹" hidden>
   </dialog>
   <script src="/static/group_view.js"></script>
   <script src="/static/segment_view.js"></script>

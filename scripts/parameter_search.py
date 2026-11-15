@@ -20,7 +20,7 @@ from scripts.search_pipeline import search_lock, pipeline, export_results, Fatal
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description='固定 group 产物，串行运行随机搜索或TPE，每组经四个标准模块。')
+    parser = argparse.ArgumentParser(description='固定 inject 产物，串行运行随机搜索或TPE，每组经四个标准模块。')
     parser.add_argument('--mode', choices=('random', 'tpe'), required=True)
     parser.add_argument('--config', type=Path, default=Path('configs/parameter_search.json'))
     args = parser.parse_args()
@@ -42,18 +42,21 @@ def main() -> int:
             raise ValueError('随机搜索固定20组，搜索评分必须使用val')
         if config['train_fixed']['precision'] not in {'fp32', 'fp16', 'bf16'}:
             raise ValueError('搜索精度必须为fp32、fp16或bf16')
-        group = (root / config['group_manifest']).resolve()
-        manifest = json.loads(group.read_text(encoding='utf-8'))
-        if manifest['status'] != 'SUCCEEDED' or manifest['module'] != 'group':
-            raise ValueError('group 输入未成功发布')
+        input_value = str(config.get('inject_manifest', '')).strip()
+        if not input_value:
+            raise ValueError('请先在 parameter_search.json 的 inject_manifest 中填写已发布 inject 产物')
+        injected = (root / input_value).resolve()
+        manifest = json.loads(injected.read_text(encoding='utf-8'))
+        if manifest['status'] != 'SUCCEEDED' or manifest['module'] != 'inject':
+            raise ValueError('inject 输入未成功发布')
         directory = root / 'data/parameter_search' / name
         directory.mkdir(parents=True, exist_ok=True)
         # 同一研究冻结配置及方法代码，避免把代码修改前后的成绩混入TPE。
         sources = sorted(path for folder in ('train','calibrate','detect','evaluate','group')
                          for path in (root / 'src/modules' / folder).glob('*.py'))
         sources.append(root / 'src/utils/precision.py')
-        fingerprint = hashlib.sha256(b''.join(path.read_bytes() for path in sources) + group.read_bytes()).hexdigest()
-        frozen = {'config': config, 'source_and_group_sha256': fingerprint}
+        fingerprint = hashlib.sha256(b''.join(path.read_bytes() for path in sources) + injected.read_bytes()).hexdigest()
+        frozen = {'config': config, 'source_and_inject_sha256': fingerprint}
         with search_lock(directory.parent / 'search.lock'):
             snapshot = directory / 'search_config.json'
             if snapshot.exists() and json.loads(snapshot.read_text(encoding='utf-8')) != frozen:

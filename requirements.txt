@@ -16,3 +16,5 @@ pyyaml
 
 openpyxl
 optuna>=4,<5
+pyarrow>=26,<27
+duckdb>=1.1,<2

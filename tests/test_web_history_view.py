@@ -7,11 +7,14 @@ import unittest
 from unittest.mock import patch
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
+from urllib.parse import quote
 import numpy as np
 import pandas as pd
 from src.app.module_catalog import artifact_module_directory
+from src.app.tables import write_table
 from src.web_console.web_util import ModuleHistoryUtil
 from src.web_console.group_view import group_result
+from src.web_console.segment_plot import segment_flight_svg
 from src.web_console.segment_view import segment_result
 from tests import test_web_console as webtests
 
@@ -46,6 +49,24 @@ def group_fixture(root: Path) -> Path:
                   'latitude_deg':np.arange(35)/100+30, 'geometric_altitude_m':altitudes}).to_csv(
         segment / 'data/input_observations.csv', index=False)
     return grouped
+
+
+def segment_plot_fixture(root: Path) -> Path:
+    """构造一个含两种阶段的航班，验证 SVG 按最终片段标签查询。"""
+    segment = history_run(root, 'segment', {})
+    data = segment / 'data'
+    write_table(pd.DataFrame({
+        'record_id': ['p0', 'p1', 'p2', 'p3'],
+        'longitude_deg': [120.0, 120.1, 120.2, 120.3],
+        'latitude_deg': [30.0, 30.1, 30.1, 30.2],
+        'geometric_altitude_m': [1000.0, 1200.0, 1400.0, 1600.0],
+    }), data, 'input_observations')
+    write_table(pd.DataFrame({
+        'record_id': ['p0', 'p1', 'p2', 'p3'], 'flight_id': ['plot-flight'] * 4,
+        'segment_id': ['plot-flight:0', 'plot-flight:0', 'plot-flight:1', 'plot-flight:1'],
+        'phase': ['climb', 'climb', 'cruise', 'cruise'], 'time_ns': [1, 2, 3, 4],
+    }), data, 'point_segment_map')
+    return segment
 
 
 class WebHistoryViewTests(unittest.TestCase):
@@ -119,6 +140,28 @@ class WebHistoryViewTests(unittest.TestCase):
             self.assertIsNone(next(item for item in value['trajectories'] if item['segment_id']=='s2')['group_id'])
             with self.assertRaises(ValueError):
                 group_result(root, '../outside')
+
+    def test_segment_flight_plot_returns_phase_colored_svg(self) -> None:
+        """航班 ID 图接口只查询该航班，生成包含阶段图例的 SVG。"""
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            segment = segment_plot_fixture(root)
+            artifact = segment.relative_to(root).as_posix()
+            image = segment_flight_svg(root, artifact, 'plot-flight')
+            self.assertIn(b'<svg', image)
+            self.assertIn(b'climb', image)
+            self.assertIn(b'width="720pt"', image)
+            cache = segment / 'flight_trajectory_svg' / 'plot-flight.svg'
+            self.assertTrue(cache.is_file())
+            self.assertEqual(cache.read_bytes(), image)
+            self.assertEqual(segment_flight_svg(root, artifact, 'plot-flight'), image)
+            with webtests.test_server(root) as server:
+                base = f'http://127.0.0.1:{server.server_port}'
+                cookie = webtests.WebConsoleTests._login(base, webtests.TOKEN)
+                address = f'{base}/api/segment/flight-plot?artifact={quote(artifact)}&flight_id=plot-flight'
+                with urlopen(Request(address, headers={'Cookie': cookie})) as response:
+                    self.assertEqual(response.headers.get_content_type(), 'image/svg+xml')
+                    self.assertIn(b'<svg', response.read())
 
     def test_http_refresh_requeries_and_blocks_active_module(self) -> None:
         with TemporaryDirectory() as directory:

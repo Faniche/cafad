@@ -41,9 +41,14 @@ def history_detail(project_root: Path, module_name: str, artifact: str) -> dict[
         'failure': failure,
         'logs': log_text,
         'logs_truncated': log_truncated,
-        'delete_preview': [item.relative_to(project_root).as_posix()
-                           for item in _dependent_directories(project_root, run_dir)],
+        'delete_preview': dependent_history_artifacts(project_root, module_name, artifact),
     }
+
+
+def dependent_history_artifacts(project_root: Path, module_name: str, artifact: str) -> list[str]:
+    """返回目标运行及其显式依赖下游，供删除和受控人工修订共同使用。"""
+    run_dir = _artifact_directory(project_root, module_name, artifact)
+    return [item.relative_to(project_root).as_posix() for item in _dependent_directories(project_root, run_dir)]
 
 
 def delete_history_run(project_root: Path, module_name: str, artifact: str) -> list[str]:

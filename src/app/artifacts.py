@@ -143,3 +143,20 @@ def write_manifest(context: RunContext, result: ModuleResult, report: Validation
         'outputs': outputs,
         'validation': 'validation.json',
     })
+
+
+def refresh_manifest_outputs(manifest_path: Path) -> None:
+    """在受控人工修订已发布产物后重新计算其输出哈希。"""
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f'找不到 manifest：{manifest_path}')
+    value = json.loads(manifest_path.read_text(encoding='utf-8'))
+    if not isinstance(value, dict) or value.get('status') != 'SUCCEEDED':
+        raise ValueError('只能刷新已成功发布运行的 manifest 输出哈希')
+    artifact_dir = manifest_path.parent.resolve()
+    outputs = []
+    for path in sorted(artifact_dir.rglob('*')):
+        if path.is_file() and path.name != 'manifest.json':
+            outputs.append({'path': str(path.relative_to(artifact_dir)).replace('\\', '/'),
+                            'bytes': path.stat().st_size, 'sha256': hash_file(path)})
+    value['outputs'] = outputs
+    write_json(manifest_path, value)

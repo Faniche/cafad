@@ -102,7 +102,8 @@ def _flight_ids(frame: pd.DataFrame, flight_gap_seconds: float) -> tuple[pd.Data
 
 def preprocess_adsb_csv(source: Path, destination: Path, *, column_overrides: Mapping[str, str],
                         altitude_unit: str, speed_unit: str, heading_unit: str,
-                        timestamp_unit: str | None, flight_gap_seconds: float) -> dict[str, object]:
+                        timestamp_unit: str | None, flight_gap_seconds: float,
+                        minimum_flight_records: int = 2) -> dict[str, object]:
     """清洗一个 ADS-B CSV，写出规范观测、拒绝记录和来源航班表。"""
     if not source.is_file():
         raise FileNotFoundError(f'找不到输入 CSV：{source}')
@@ -112,6 +113,8 @@ def preprocess_adsb_csv(source: Path, destination: Path, *, column_overrides: Ma
         raise ValueError('数值时间戳单位必须为 s、ms、us 或 ns')
     if not np.isfinite(flight_gap_seconds) or flight_gap_seconds <= 0:
         raise ValueError('flight_gap_seconds 必须为正的有限数')
+    if minimum_flight_records < 1:
+        raise ValueError('minimum_flight_records 必须为正整数')
     source_hash = sha256_file(source)
     raw = pd.read_csv(source, dtype='string', keep_default_na=False)
     if raw.empty:
@@ -160,6 +163,17 @@ def preprocess_adsb_csv(source: Path, destination: Path, *, column_overrides: Ma
     })
     frame = frame.loc[~duplicate].copy()
     frame, flights = _flight_ids(frame, flight_gap_seconds)
+    too_short = flights.loc[flights['records'] < minimum_flight_records, 'flight_id']
+    isolated_points = frame.loc[frame['flight_id'].isin(too_short), 'source_row_index'].to_numpy(dtype=np.int64)
+    isolated_rejections = pd.DataFrame({
+        'source_row_index': isolated_points,
+        'reason': f'flight_records_below_minimum_{minimum_flight_records}',
+    })
+    if len(isolated_rejections):
+        frame = frame.loc[~frame['flight_id'].isin(too_short)].copy()
+        flights = flights.loc[~flights['flight_id'].isin(too_short)].copy()
+    if frame.empty:
+        raise ValueError('剔除记录数不足的连续航班会话后没有保留任何有效记录')
     frame['record_id'] = [hashlib.sha256(f'{source_hash}:{value}'.encode('utf-8')).hexdigest()[:32]
                           for value in frame['source_row_index'].to_numpy(dtype=np.int64)]
     observations = pd.DataFrame({
@@ -178,7 +192,7 @@ def preprocess_adsb_csv(source: Path, destination: Path, *, column_overrides: Ma
         'source_row_index': np.arange(len(reason), dtype=np.int64)[reason != ''],
         'reason': reason[reason != ''],
     })
-    rejection_table = pd.concat((invalid_rejections, duplicate_rejections), ignore_index=True)
+    rejection_table = pd.concat((invalid_rejections, duplicate_rejections, isolated_rejections), ignore_index=True)
     if rejection_table['source_row_index'].duplicated().any():
         raise RuntimeError('同一原始记录不能被写入多次删除清单')
     if len(observations) + len(rejection_table) != len(raw):
@@ -190,5 +204,8 @@ def preprocess_adsb_csv(source: Path, destination: Path, *, column_overrides: Ma
         'flights': int(len(flights)), 'columns': selected,
         'units': {'altitude': 'm', 'speed': 'm/s', 'heading': 'degrees'},
         'flight_gap_seconds': flight_gap_seconds,
+        'minimum_flight_records': minimum_flight_records,
+        'isolated_flight_sessions': int(len(too_short)),
+        'isolated_flight_records': int(len(isolated_rejections)),
     }
     return summary

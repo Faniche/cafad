@@ -26,6 +26,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help='仅数值时间戳需要，字符串时间戳不得猜测单位')
     parser.add_argument('--flight-gap-seconds', type=float, default=1800.0,
                         help='同 ICAO/CALL 相邻观测超过该时间间隔时拆分来源航班')
+    parser.add_argument('--minimum-flight-records', type=int, default=2,
+                        help='连续航班会话至少保留的记录数；默认 2，仅剔除孤立单点会话')
     for name in ('icao', 'call', 'time', 'longitude', 'latitude', 'geometric_altitude',
                  'barometric_altitude', 'heading', 'speed'):
         parser.add_argument(f'--{name.replace("_", "-")}-column', dest=f'{name}_column')
@@ -47,9 +49,11 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
     summary = preprocess_adsb_csv(source, context.staging_dir / 'data', column_overrides=overrides,
                                   altitude_unit=args.altitude_unit, speed_unit=args.speed_unit,
                                   heading_unit=args.heading_unit, timestamp_unit=args.timestamp_unit,
-                                  flight_gap_seconds=args.flight_gap_seconds)
-    context.logger.info('预处理完成：输入=%d，保留=%d，剔除=%d，来源航班=%d',
-                        summary['input_rows'], summary['kept_rows'], summary['rejected_rows'], summary['flights'])
+                                  flight_gap_seconds=args.flight_gap_seconds,
+                                  minimum_flight_records=args.minimum_flight_records)
+    context.logger.info('预处理完成：输入=%d，保留=%d，剔除=%d，来源航班=%d，孤立会话=%d',
+                        summary['input_rows'], summary['kept_rows'], summary['rejected_rows'], summary['flights'],
+                        summary['isolated_flight_sessions'])
     return ModuleResult(summary=summary)
 
 

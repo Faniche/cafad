@@ -33,7 +33,6 @@ const historyStatus = document.querySelector('#history-status');
 const historyRows = document.querySelector('#history-rows');
 const historyDetail = document.querySelector('#history-detail');
 const historySummary = document.querySelector('#history-summary');
-const historyLogs = document.querySelector('#history-logs');
 const historyHead = document.querySelector('#history-head');
 const groupResult = document.querySelector('#group-result');
 const segmentResult = document.querySelector('#segment-result');
@@ -575,7 +574,7 @@ function clearHistory() {
   if (segmentTimer) clearInterval(segmentTimer); segmentTimer = null;
   segmentResult.hidden = true; segmentResult.replaceChildren();
   historyPanel.hidden = true; historyRows.replaceChildren(); historyDetail.hidden = true;
-  historyStatus.textContent = ''; historySummary.textContent = ''; historyLogs.textContent = '';
+  historyStatus.textContent = ''; historySummary.textContent = '';
 }
 
 async function loadHistory(moduleName, manual = false) {
@@ -590,7 +589,7 @@ async function loadHistory(moduleName, manual = false) {
   segmentResult.hidden = true; segmentResult.replaceChildren();
   historyRefresh.disabled = true;
   historyPanel.hidden = false; historyStatus.textContent = '正在读取历史运行…'; historyRows.replaceChildren();
-  historyDetail.hidden = true; historySummary.textContent = ''; historyLogs.textContent = '';
+  historyDetail.hidden = true; historySummary.textContent = '';
   try {
     const data = await apiRequest(`/api/history?module=${encodeURIComponent(moduleName)}${manual ? '&refresh=1' : ''}`);
     if (selectedModule !== moduleName || version !== historyVersion) return;
@@ -656,7 +655,7 @@ async function loadHistoryDetail(moduleName, artifact) {
     if (selectedModule !== moduleName || version !== detailVersion) return null;
     const result = data.summary || data.failure || { message: '该运行尚未生成摘要。' };
     historySummary.textContent = JSON.stringify(result, null, 2);
-    historyLogs.textContent = `${data.logs_truncated ? '[仅显示日志尾部]\n' : ''}${data.logs || '未找到对应日志。'}`;
+    showHistoryTaskOutput(data);
     historyDetail.hidden = false;
     if (moduleName === 'group') {
       groupResult.hidden = false; groupResult.textContent = '正在读取分组统计与轨迹…';
@@ -666,10 +665,21 @@ async function loadHistoryDetail(moduleName, artifact) {
     }
     if (moduleName === 'segment') {
       segmentResult.hidden = false;
+      const savePhases = async (segmentIds, phase) => {
+        const saved = await apiRequest('/api/segment/phases', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ artifact, segment_ids: segmentIds, phase }),
+        });
+        clearSegmentSelection();
+        historyStatus.textContent = saved.changed_segments
+          ? `已修改 ${saved.changed_segments} 个片段为 ${saved.phase}。`
+          : '所选片段标签没有变化。';
+        await loadHistoryDetail('segment', artifact);
+      };
       const refresh = async () => {
         try {
           const result = await apiRequest(`/api/segment/result?artifact=${encodeURIComponent(artifact)}`);
-          if (selectedModule === 'segment' && version === detailVersion) renderSegmentResult(segmentResult, result);
+          if (selectedModule === 'segment' && version === detailVersion) renderSegmentResult(segmentResult, result, artifact, savePhases);
         } catch (error) { if (version === detailVersion) segmentResult.textContent = `阶段进度读取失败：${error.message}`; }
       };
       await refresh();
@@ -680,6 +690,15 @@ async function loadHistoryDetail(moduleName, artifact) {
     if (selectedModule === moduleName) historyStatus.textContent = `读取运行详情失败：${error.message}`;
     return null;
   }
+}
+
+function showHistoryTaskOutput(data) {
+  stopPolling(); currentJob = null; nextOffset = 0; clearElapsed();
+  const entry = data.entry || {};
+  command.textContent = `历史运行：${entry.artifact || '未知产物'}`;
+  jobStatus.textContent = `历史 ${entry.state || 'unknown'}`;
+  logs.textContent = `${data.logs_truncated ? '[仅显示日志尾部]\n' : ''}${data.logs || '未找到对应日志。'}`;
+  setJobControls();
 }
 
 async function deleteHistoryRun(moduleName, artifact) {
