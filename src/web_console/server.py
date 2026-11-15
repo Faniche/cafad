@@ -27,7 +27,7 @@ from .train_util import TrainTaskQueue
 from .web_util import ModuleHistoryUtil
 from .group_view import group_result
 from .segment_view import segment_result, update_segment_phases
-from .segment_plot import segment_flight_svg
+from .segment_plot import plotly_javascript, segment_flight_html, segment_flight_svg
 from .service import JobManager, build_command, module_catalog, module_schemas, serialize_schemas, upstream_manifest_choices
 
 
@@ -101,6 +101,26 @@ def _svg_response(handler: BaseHTTPRequestHandler, value: bytes) -> None:
     handler.send_header('Content-Type', 'image/svg+xml; charset=utf-8')
     handler.send_header('Content-Length', str(len(value)))
     handler.send_header('Cache-Control', 'no-store')
+    handler.end_headers()
+    handler.wfile.write(value)
+
+
+def _html_response(handler: BaseHTTPRequestHandler, value: bytes) -> None:
+    """返回已缓存的交互式轨迹 HTML；只来自受限的 segment 运行目录。"""
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header('Content-Type', 'text/html; charset=utf-8')
+    handler.send_header('Content-Length', str(len(value)))
+    handler.send_header('Cache-Control', 'no-store')
+    handler.end_headers()
+    handler.wfile.write(value)
+
+
+def _javascript_response(handler: BaseHTTPRequestHandler, value: bytes) -> None:
+    """返回交互式预览共用的本机 Plotly 脚本，避免访问外部 CDN。"""
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header('Content-Type', 'text/javascript; charset=utf-8')
+    handler.send_header('Content-Length', str(len(value)))
+    handler.send_header('Cache-Control', 'public, max-age=86400')
     handler.end_headers()
     handler.wfile.write(value)
 
@@ -210,6 +230,18 @@ def create_handler(
                     ))
                 except (ValueError, OSError, RuntimeError, duckdb.Error) as exc:
                     _json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
+                return
+            if parsed.path == '/api/segment/flight-plot-interactive':
+                try:
+                    query = parse_qs(parsed.query)
+                    _html_response(self, segment_flight_html(
+                        project_root, query.get('artifact', [''])[0], query.get('flight_id', [''])[0],
+                    ))
+                except (ValueError, OSError, RuntimeError, duckdb.Error) as exc:
+                    _json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
+                return
+            if parsed.path == '/api/segment/plotly.min.js':
+                _javascript_response(self, plotly_javascript())
                 return
             if parsed.path == '/api/segment/phases':
                 _json_response(self, HTTPStatus.METHOD_NOT_ALLOWED, {'error': '请使用 POST 修改阶段标签'})

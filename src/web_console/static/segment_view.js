@@ -1,36 +1,37 @@
 let segmentArtifact = null;
 const selectedPhaseFilters = new Set();
 const selectedSegments = new Set();
-let flightPlotUrl = null;
 let flightPlotRequest = 0;
 const flightPlotDialog = document.querySelector('#flight-plot-dialog');
 const flightPlotTitle = document.querySelector('#flight-plot-title');
 const flightPlotStatus = document.querySelector('#flight-plot-status');
-const flightPlotImage = document.querySelector('#flight-plot-image');
+const flightPlotFrame = document.querySelector('#flight-plot-frame');
 
 function closeFlightPlot() {
   flightPlotRequest += 1;
   if (flightPlotDialog.open) flightPlotDialog.close();
-  if (flightPlotUrl) { URL.revokeObjectURL(flightPlotUrl); flightPlotUrl = null; }
-  flightPlotImage.removeAttribute('src'); flightPlotImage.hidden = true;
+  flightPlotFrame.removeAttribute('src'); flightPlotFrame.hidden = true;
 }
 
 async function showFlightPlot(artifact, flightId) {
   const request = ++flightPlotRequest;
   flightPlotTitle.textContent = `航班 ${flightId.slice(0, 8)} 的三维轨迹`;
-  flightPlotStatus.textContent = '正在读取或生成按阶段着色的三维 SVG…'; flightPlotImage.hidden = true;
+  flightPlotStatus.textContent = '正在读取或生成可拖动的三维轨迹…'; flightPlotFrame.hidden = true;
   if (!flightPlotDialog.open) flightPlotDialog.showModal();
+  const address = `/api/segment/flight-plot-interactive?artifact=${encodeURIComponent(artifact)}&flight_id=${encodeURIComponent(flightId)}`;
   try {
-    const response = await fetch(`/api/segment/flight-plot?artifact=${encodeURIComponent(artifact)}&flight_id=${encodeURIComponent(flightId)}`);
+    const response = await fetch(address);
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
       throw new Error(body.error || `请求失败：${response.status}`);
     }
-    const nextUrl = URL.createObjectURL(await response.blob());
-    if (request !== flightPlotRequest) { URL.revokeObjectURL(nextUrl); return; }
-    if (flightPlotUrl) URL.revokeObjectURL(flightPlotUrl);
-    flightPlotUrl = nextUrl; flightPlotImage.src = nextUrl; flightPlotImage.hidden = false;
-    flightPlotStatus.textContent = '经度、纬度、几何高度；颜色表示最终阶段标签。首次生成后保存在本次运行目录，后续点击直接加载。';
+    if (request !== flightPlotRequest) return;
+    flightPlotFrame.onload = () => {
+      if (request !== flightPlotRequest) return;
+      flightPlotFrame.hidden = false;
+      flightPlotStatus.textContent = '可拖动旋转、滚轮缩放；★ 为起点，➤ 为终点。颜色在所有阶段图中固定：GND 灰、CL 绿、LVL 蓝、CR 紫、DE 橙、NA 红。首次生成后保存在本次运行目录，后续点击直接加载。';
+    };
+    flightPlotFrame.src = address;
   } catch (error) { flightPlotStatus.textContent = `三维图生成失败：${error.message}`; }
 }
 
