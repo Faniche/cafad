@@ -1,18 +1,28 @@
-"""group_view.py | 2026-11-09 | 从已发布分组及其上游生成只读统计和三维预览 | Codex."""
+"""group_view.py | 2026-11-15 | 从已发布硬分组生成只读统计并定位上游数据 | Codex."""
 from functools import lru_cache
 from pathlib import Path
-import numpy as np
 import pandas as pd
 from src.app.tables import read_table
 from .history import _artifact_directory, _read_json_object
 
 
 def group_result(root: Path, artifact: str) -> dict[str, object]:
-    """约束依赖路径并缓存两个结果；不修改已发布产物和 manifest。"""
+    """返回全部成员统计；轨迹图由点击单个分组后的独立接口按需生成。"""
+    directory, source = group_source(root, artifact)
+    if directory is None or source is None:
+        return {'groups': [], 'note': '分组尚未成功发布。'}
+    files = [_table_file(directory / 'data', 'routing_segments'), _table_file(source, 'point_segment_map'),
+             _table_file(source, 'input_observations')]
+    signature = tuple((file.stat().st_mtime_ns, file.stat().st_size) for file in files)
+    return _build(directory, source, signature)
+
+
+def group_source(root: Path, artifact: str) -> tuple[Path | None, Path | None]:
+    """受控解析已发布 group 与唯一 segment 上游，供统计和按需绘图复用。"""
     directory = _artifact_directory(root, 'group', artifact)
     manifest = _read_json_object(directory / 'manifest.json') or {}
     if manifest.get('status') != 'SUCCEEDED':
-        return {'groups': [], 'trajectories': [], 'note': '分组尚未成功发布。'}
+        return None, None
     dependencies = manifest.get('dependencies', [])
     paths = [Path(item['manifest']) for item in dependencies if isinstance(item, dict) and 'manifest' in item]
     segmented = []
@@ -23,28 +33,20 @@ def group_result(root: Path, artifact: str) -> dict[str, object]:
             segmented.append(candidate)
     if len(segmented) != 1:
         raise ValueError('无法唯一定位 group 的 segment 上游')
-    source = segmented[0] / 'data'
-    files = [_table_file(directory / 'data', 'routing_segments'), _table_file(source, 'point_segment_map'),
-             _table_file(source, 'input_observations')]
-    signature = tuple((file.stat().st_mtime_ns, file.stat().st_size) for file in files)
-    return _build(directory, source, signature)
+    return directory, segmented[0] / 'data'
 
 
 @lru_cache(maxsize=2)
 def _build(directory: Path, source: Path, signature: tuple) -> dict[str, object]:
-    """统计使用全部成员点；图每片段最多24点，观测分块读取限制额外内存。"""
+    """统计使用全部成员点；不为概览提前读取或降采样整组轨迹。"""
     members = _read(directory / 'data', 'routing_segments').astype(str)
     mapping = _read(source, 'point_segment_map', columns=['record_id', 'segment_id', 'time_ns'],
                     dtype={'record_id': str, 'segment_id': str}).sort_values('time_ns', kind='stable')
     if mapping['record_id'].duplicated().any() or members['segment_id'].duplicated().any():
         raise ValueError('点映射或分组成员存在重复 ID')
     segment_groups = members.set_index('segment_id')['group_id'].to_dict()
-    sampled = []
-    for _, frame in mapping.groupby('segment_id', sort=False):
-        sampled.append(frame.iloc[np.linspace(0, len(frame) - 1, min(24, len(frame)), dtype=int)])
-    sample_map = pd.concat(sampled).set_index('record_id')['segment_id'] if sampled else pd.Series(dtype=str)
     point_map = mapping.set_index('record_id')['segment_id']
-    partials, plotted = [], []
+    partials = []
     fields = ['longitude_deg', 'latitude_deg', 'geometric_altitude_m']
     observations = _read(source, 'input_observations', columns=['record_id', 'time_ns', *fields], dtype={'record_id': str})
     for chunk in (observations.iloc[start:start + 100_000].copy() for start in range(0, len(observations), 100_000)):
@@ -56,8 +58,6 @@ def _build(directory: Path, source: Path, signature: tuple) -> dict[str, object]
                 min_lon=('longitude_deg', 'min'), max_lon=('longitude_deg', 'max'),
                 min_lat=('latitude_deg', 'min'), max_lat=('latitude_deg', 'max'),
                 min_alt=('geometric_altitude_m', 'min'), max_alt=('geometric_altitude_m', 'max')))
-        visible = chunk.loc[chunk['record_id'].isin(sample_map.index), ['segment_id', 'time_ns', *fields]]
-        plotted.append(visible)
     if not partials:
         raise ValueError('分组成员没有对应的有效观测')
     aggregate = {'points': 'sum', **{key: 'min' for key in ('earliest', 'min_lon', 'min_lat', 'min_alt')},
@@ -81,11 +81,8 @@ def _build(directory: Path, source: Path, signature: tuple) -> dict[str, object]
                        'members': [{'segment_id': sid, 'points': int(rows.loc[sid, 'points']),
                                     'flight_id': detail.loc[detail['segment_id'].eq(sid), 'flight_id'].iloc[0]}
                                    for sid in rows.index]})
-    trajectories = [{'segment_id': sid, 'group_id': segment_groups.get(sid),
-                     'points': frame[fields].round(6).to_numpy().tolist()}
-                    for sid, frame in pd.concat(plotted).sort_values('time_ns', kind='stable').groupby('segment_id', sort=False)]
-    return {'groups': groups, 'trajectories': trajectories,
-            'note': '统计为建组正常训练成员的全部观测；时间为 UTC，高度为几何高度（米）。图包含该 segment 产物中全部片段，每片段最多24个展示点；灰色为未参与建组的片段。范围框是经纬高外包框，允许重叠，不代表互斥空域；各轴独立缩放。'}
+    return {'groups': groups,
+            'note': '统计为建组正常训练成员的全部观测；时间为 UTC，高度为几何高度（米）。点击分组 ID 时才读取并绘制该组内轨迹；每条片段使用独立颜色。'}
 
 
 def _table_file(directory: Path, name: str) -> Path:

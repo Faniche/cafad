@@ -12,12 +12,11 @@ function closeFlightPlot() {
   flightPlotFrame.removeAttribute('src'); flightPlotFrame.hidden = true;
 }
 
-async function showFlightPlot(artifact, flightId) {
+async function showTrajectoryPlot(title, address, completedText) {
   const request = ++flightPlotRequest;
-  flightPlotTitle.textContent = `航班 ${flightId.slice(0, 8)} 的三维轨迹`;
+  flightPlotTitle.textContent = title;
   flightPlotStatus.textContent = '正在读取或生成可拖动的三维轨迹…'; flightPlotFrame.hidden = true;
   if (!flightPlotDialog.open) flightPlotDialog.showModal();
-  const address = `/api/segment/flight-plot-interactive?artifact=${encodeURIComponent(artifact)}&flight_id=${encodeURIComponent(flightId)}`;
   try {
     const response = await fetch(address);
     if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || `请求失败：${response.status}`);
@@ -25,10 +24,16 @@ async function showFlightPlot(artifact, flightId) {
     flightPlotFrame.onload = () => {
       if (request !== flightPlotRequest) return;
       flightPlotFrame.hidden = false;
-      flightPlotStatus.textContent = '可拖动旋转、滚轮缩放；★ 为起点，➤ 为终点。颜色按硬时空单元固定；首次生成后缓存到本次运行目录。';
+      flightPlotStatus.textContent = completedText;
     };
     flightPlotFrame.src = address;
   } catch (error) { flightPlotStatus.textContent = `三维图生成失败：${error.message}`; }
+}
+
+async function showFlightPlot(artifact, flightId) {
+  const address = `/api/segment/flight-plot-interactive?artifact=${encodeURIComponent(artifact)}&flight_id=${encodeURIComponent(flightId)}`;
+  return showTrajectoryPlot(`航班 ${flightId.slice(0, 8)} 的三维轨迹`, address,
+    '可拖动旋转、滚轮缩放；★ 为起点，➤ 为终点。颜色按硬时空单元固定；首次生成后缓存到本次运行目录。');
 }
 
 document.querySelector('#flight-plot-close').addEventListener('click', closeFlightPlot);

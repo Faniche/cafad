@@ -13,6 +13,7 @@ import pandas as pd
 from src.app.module_catalog import artifact_module_directory
 from src.app.tables import write_table
 from src.web_console.web_util import ModuleHistoryUtil
+from src.web_console.group_plot import group_trajectory_html
 from src.web_console.group_view import group_result
 from src.web_console.segment_plot import _altitude_axis_upper, segment_flight_html, segment_flight_svg
 from src.web_console.segment_view import segment_result
@@ -32,7 +33,7 @@ def history_run(root: Path, module: str, parameters: dict, dependencies: list[Pa
 
 
 def group_fixture(root: Path) -> Path:
-    """两个建组片段和一个灰色背景片段，含未被绘图抽中的高度极值。"""
+    """两个建组片段和一个非成员片段，含用于完整统计的高度极值。"""
     segment = history_run(root, 'segment', {})
     grouped = history_run(root, 'group', {}, [segment])
     pd.DataFrame({'group_id': ['g0','g0'], 'segment_id': ['s0','s1'], 'flight_id': ['f0','f1']}).to_csv(
@@ -141,11 +142,35 @@ class WebHistoryViewTests(unittest.TestCase):
             self.assertEqual(group['min_alt'], 0)
             self.assertEqual(group['earliest'], '2023-11-14T22:13:20+00:00')
             self.assertEqual(group['latest'], '2023-11-14T22:13:52+00:00')
-            self.assertEqual(len(value['trajectories']), 3)
-            self.assertTrue(all(len(item['points']) <= 24 for item in value['trajectories']))
-            self.assertIsNone(next(item for item in value['trajectories'] if item['segment_id']=='s2')['group_id'])
+            self.assertNotIn('trajectories', value)
             with self.assertRaises(ValueError):
                 group_result(root, '../outside')
+
+    def test_group_trajectory_plot_reads_only_selected_group_members(self) -> None:
+        """组图端点仅绘制点击组内路径，并将 HTML 缓存到 group 运行目录。"""
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            grouped = group_fixture(root)
+            artifact = grouped.relative_to(root).as_posix()
+            segment = grouped / 'manifest.json'
+            source = Path(json.loads(segment.read_text())['dependencies'][0]['manifest']).parent / 'data'
+            for data_directory, name in ((grouped / 'data', 'routing_segments'),
+                                         (source, 'point_segment_map'),
+                                         (source, 'input_observations')):
+                write_table(pd.read_csv(data_directory / f'{name}.csv'), data_directory, name)
+            page = group_trajectory_html(root, artifact, 'g0')
+            self.assertIn(b'Plotly.newPlot', page)
+            self.assertIn(b'Group g0: 2 trajectories', page)
+            self.assertIn(b'/api/segment/plotly.min.js', page)
+            cached = grouped / 'group_trajectory_html'
+            self.assertEqual(len(list(cached.glob('*.html'))), 1)
+            with webtests.test_server(root) as server:
+                base = f'http://127.0.0.1:{server.server_port}'
+                cookie = webtests.WebConsoleTests._login(base, webtests.TOKEN)
+                address = f'{base}/api/group/trajectory-plot-interactive?artifact={quote(artifact)}&group_id=g0'
+                with urlopen(Request(address, headers={'Cookie': cookie})) as response:
+                    self.assertEqual(response.headers.get_content_type(), 'text/html')
+                    self.assertIn(b'Group g0: 2 trajectories', response.read())
 
     def test_segment_flight_plot_returns_hard_cell_colored_svg(self) -> None:
         """航班 ID 图接口只查询该航班，生成包含硬单元图例的 SVG。"""

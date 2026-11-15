@@ -660,7 +660,7 @@ async function loadHistoryDetail(moduleName, artifact) {
     if (moduleName === 'group') {
       groupResult.hidden = false; groupResult.textContent = '正在读取分组统计与轨迹…';
       apiRequest(`/api/group/result?artifact=${encodeURIComponent(artifact)}`).then((result) => {
-        if (selectedModule === moduleName && version === detailVersion) renderGroupResult(groupResult, result);
+        if (selectedModule === moduleName && version === detailVersion) renderGroupResult(groupResult, result, artifact);
       }).catch((error) => { if (version === detailVersion) groupResult.textContent = `分组展示失败：${error.message}`; });
     }
     if (moduleName === 'segment') {

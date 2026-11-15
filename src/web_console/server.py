@@ -25,6 +25,7 @@ from .restart import RestartController
 from .train_monitor import training_progress
 from .train_util import TrainTaskQueue
 from .web_util import ModuleHistoryUtil
+from .group_plot import group_trajectory_html
 from .group_view import group_result
 from .segment_view import segment_result
 from .segment_plot import plotly_javascript, segment_flight_html, segment_flight_svg
@@ -213,6 +214,15 @@ def create_handler(
                     artifact = parse_qs(parsed.query).get('artifact', [''])[0]
                     _json_response(self, HTTPStatus.OK, group_result(project_root, artifact))
                 except (ValueError, OSError, KeyError) as exc:
+                    _json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
+                return
+            if parsed.path == '/api/group/trajectory-plot-interactive':
+                try:
+                    query = parse_qs(parsed.query)
+                    _html_response(self, group_trajectory_html(
+                        project_root, query.get('artifact', [''])[0], query.get('group_id', [''])[0],
+                    ))
+                except (ValueError, OSError, RuntimeError, duckdb.Error) as exc:
                     _json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
                 return
             if parsed.path == '/api/segment/result':
