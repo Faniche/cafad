@@ -14,7 +14,7 @@ from src.app.module_catalog import artifact_module_directory
 from src.app.tables import write_table
 from src.web_console.web_util import ModuleHistoryUtil
 from src.web_console.group_view import group_result
-from src.web_console.segment_plot import segment_flight_html, segment_flight_svg
+from src.web_console.segment_plot import _altitude_axis_upper, segment_flight_html, segment_flight_svg
 from src.web_console.segment_view import segment_result
 from tests import test_web_console as webtests
 
@@ -70,6 +70,11 @@ def segment_plot_fixture(root: Path) -> Path:
 
 
 class WebHistoryViewTests(unittest.TestCase):
+    def test_flight_plot_uses_a_minimum_15000_m_altitude_axis(self) -> None:
+        """低空航班使用统一高度尺度，高于其的航班不被截断。"""
+        self.assertEqual(_altitude_axis_upper(np.array([0.0, 9_000.0, 12_000.0])), 15_000.0)
+        self.assertEqual(_altitude_axis_upper(np.array([0.0, 15_123.0])), 15_123.0)
+
     def test_running_segment_exposes_parent_committed_progress_only(self) -> None:
         """运行中的阶段表从暂存目录 SQLite 读取，供 AJAX 安全轮询。"""
         with TemporaryDirectory() as directory:

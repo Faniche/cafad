@@ -23,8 +23,9 @@ from .history import _artifact_directory
 
 
 MAX_POINTS_PER_PHASE = 600
+MINIMUM_ALTITUDE_AXIS_UPPER_METERS = 15_000.0
 _FLIGHT_ID = re.compile(r'[A-Za-z0-9_-]+\Z')
-_CACHE_MARKER = b'<!-- CAFAD phase trajectory plot v4 -->\n'
+_CACHE_MARKER = b'<!-- CAFAD phase trajectory plot v5 -->\n'
 
 
 def segment_flight_svg(project_root: Path, artifact: str, flight_id: str) -> bytes:
@@ -144,6 +145,7 @@ def _draw_flight_svg(flight_id: str, phase_paths: dict[str, list[np.ndarray]], f
         all_points.extend(paths)
     coordinates = np.concatenate(all_points)
     axis.auto_scale_xyz(coordinates[:, 0], coordinates[:, 1], coordinates[:, 2])
+    axis.set_zlim(0.0, _altitude_axis_upper(flight_path[:, 2]))
     _add_svg_end_markers(axis, flight_path)
     axis.set_xlabel('Longitude (deg)')
     axis.set_ylabel('Latitude (deg)')
@@ -155,6 +157,12 @@ def _draw_flight_svg(flight_id: str, phase_paths: dict[str, list[np.ndarray]], f
     figure.savefig(output, format='svg')
     plt.close(figure)
     return output.getvalue()
+
+
+def _altitude_axis_upper(altitudes: np.ndarray) -> float:
+    """为航班图给出可比较的高度轴上限，低空航班仍显示 0–15,000 m。"""
+    maximum = float(np.max(altitudes))
+    return max(MINIMUM_ALTITUDE_AXIS_UPPER_METERS, maximum)
 
 
 def _add_svg_end_markers(axis: object, flight_path: np.ndarray) -> None:
@@ -193,6 +201,7 @@ def _draw_flight_html(flight_id: str, phase_paths: dict[str, list[np.ndarray]], 
         x=[flight_path[-1, 0]], y=[flight_path[-1, 1]], z=[flight_path[-1, 2]], mode='text',
         text=['➤'], textfont={'color': '#111827', 'size': 14}, name='End', hovertemplate='End<extra></extra>',
     ))
+    altitude_upper = _altitude_axis_upper(flight_path[:, 2])
     figure.update_layout(
         title=f'Flight {flight_id[:12]}: phase paths',
         margin={'l': 0, 'r': 0, 'b': 0, 't': 42},
@@ -200,7 +209,7 @@ def _draw_flight_html(flight_id: str, phase_paths: dict[str, list[np.ndarray]], 
         scene={
             'dragmode': 'orbit',
             'xaxis_title': 'Longitude (deg)', 'yaxis_title': 'Latitude (deg)',
-            'zaxis_title': 'Geometric altitude (m)',
+            'zaxis': {'title': 'Geometric altitude (m)', 'range': [0.0, altitude_upper]},
         },
     )
     page = plotly_io.to_html(
