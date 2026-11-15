@@ -57,9 +57,15 @@ def score_partition(trained: Path, split: str, gpus: str,
     if targets.empty:
         raise ValueError(f'{split} 分区没有片段')
     sequences, _ = (_load_sequences_from_data(source_data) if target_data is not None else _load_sequences(segmented, injected))
-    groups = read_table(grouped.parent / 'data', 'groups', columns=['group_id'], keep_default_na=False)
-    cell_groups = read_table(grouped.parent / 'data', 'cell_group_map', columns=['cell_key', 'group_id'],
-                             keep_default_na=False, dtype={'cell_key': 'string', 'group_id': 'string'})
+    group_data = grouped.parent / 'data'
+    groups = read_table(group_data, 'groups', columns=['group_id'], keep_default_na=False)
+    try:
+        cell_groups = read_table(group_data, 'cell_group_map', columns=['cell_key', 'group_id'],
+                                 keep_default_na=False, dtype={'cell_key': 'string', 'group_id': 'string'})
+    except FileNotFoundError:
+        # 旧硬分组产物尚未发布基础单元映射时，保留其 group_id=cell_key 的原有精确路由语义。
+        cell_groups = read_table(group_data, 'groups', columns=['cell_key', 'group_id'],
+                                 keep_default_na=False, dtype={'cell_key': 'string', 'group_id': 'string'})
     pairs = _routing_pairs(targets, groups, cell_groups)
     scores = score_pairs(pairs, sequences, trained.parent, _devices(gpus), workers, task_size, logger)
     fused: list[dict[str, object]] = []
