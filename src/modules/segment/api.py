@@ -20,8 +20,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--input', required=True, type=Path, help='split 模块已发布的 manifest.json')
     parser.add_argument('--lower-height-m', type=float, default=3000.0, help='低／中高度层边界（m，默认 3000）')
     parser.add_argument('--upper-height-m', type=float, default=6000.0, help='中／高高度层边界（m，默认 6000）')
-    parser.add_argument('--time-bucket-seconds', type=float, default=1200.0, help='相对数据集最早时刻的时间桶宽度（秒，默认 1200）')
-    parser.add_argument('--grid-degrees', type=float, default=0.5, help='经纬度方格边长（度，默认 0.5）')
+    parser.add_argument('--low-time-bucket-seconds', type=float, default=1200.0, help='低高度层时间桶宽度（秒，默认 1200，即 20 分钟）')
+    parser.add_argument('--middle-time-bucket-seconds', type=float, default=1800.0, help='中高度层时间桶宽度（秒，默认 1800，即 30 分钟）')
+    parser.add_argument('--high-time-bucket-seconds', type=float, default=7200.0, help='高高度层时间桶宽度（秒，默认 7200，即 2 小时）')
+    parser.add_argument('--low-grid-degrees', type=float, default=0.5, help='低高度层经纬网格边长（度，默认 0.5）')
+    parser.add_argument('--middle-grid-degrees', type=float, default=3.0, help='中高度层经纬网格边长（度，默认 3）')
+    parser.add_argument('--high-grid-degrees', type=float, default=12.0, help='高高度层经纬网格边长（度，默认 12）')
     return parser
 
 
@@ -40,7 +44,9 @@ def _preprocess_manifest(split_manifest: Path) -> Path:
 
 def hard_config(args: argparse.Namespace) -> HardSegmentConfig:
     """从统一 CLI 参数构造并校验可由 detect 重放的规则配置。"""
-    config = HardSegmentConfig(args.lower_height_m, args.upper_height_m, args.time_bucket_seconds, args.grid_degrees)
+    config = HardSegmentConfig(args.lower_height_m, args.upper_height_m,
+                               args.low_time_bucket_seconds, args.middle_time_bucket_seconds, args.high_time_bucket_seconds,
+                               args.low_grid_degrees, args.middle_grid_degrees, args.high_grid_degrees)
     config.validate()
     return config
 
@@ -63,9 +69,12 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
     summary = segment_observations(observations, context.staging_dir / 'data', config,
                                    int(all_observations['time_ns'].min()), context.logger)
     result = {'input_manifest': str(input_manifest), 'preprocess_manifest': str(preprocess), **summary}
-    context.logger.info('硬分段发布：片段=%d；唯一规则单元=%d；高度=[0,%gm)、[%gm,%gm)、[%gm,+∞)；时间桶=%gs；网格=%g°',
+    context.logger.info('硬分段发布：片段=%d；唯一规则单元=%d；高度=[0,%gm)、[%gm,%gm)、[%gm,+∞)；'
+                        '时间桶（低/中/高）=%g/%g/%gs；网格（低/中/高）=%g/%g/%g°',
                         summary['segments'], summary['cells'], config.lower_height_m, config.lower_height_m,
-                        config.upper_height_m, config.upper_height_m, config.time_bucket_seconds, config.grid_degrees)
+                        config.upper_height_m, config.upper_height_m, config.low_time_bucket_seconds,
+                        config.middle_time_bucket_seconds, config.high_time_bucket_seconds,
+                        config.low_grid_degrees, config.middle_grid_degrees, config.high_grid_degrees)
     return ModuleResult(summary=result, dependencies=(input_manifest,))
 
 

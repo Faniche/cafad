@@ -37,8 +37,11 @@ def _test_segmentation(context: RunContext, trained: Path, output: Path) -> dict
     test = source.loc[source['split'].eq('test')].copy()
     if test.empty:
         raise ValueError('inject 产物没有测试集观测')
-    runtime = HardSegmentConfig(**{name: float(rules[name]) for name in ('lower_height_m', 'upper_height_m',
-                                                                          'time_bucket_seconds', 'grid_degrees')})
+    rule_names = ('lower_height_m', 'upper_height_m', 'low_time_bucket_seconds', 'middle_time_bucket_seconds',
+                  'high_time_bucket_seconds', 'low_grid_degrees', 'middle_grid_degrees', 'high_grid_degrees')
+    if not all(name in rules for name in rule_names):
+        raise ValueError('训练祖先缺少按高度层配置的硬分段规则；请从 segment 重新运行后续模块')
+    runtime = HardSegmentConfig(**{name: float(rules[name]) for name in rule_names})
     summary = segment_observations(test, output, runtime, int(segment_summary['time_origin_ns']), context.logger)
     context.logger.info('测试集动态硬分段完成：points=%d；segments=%d；cells=%d',
                         summary['points'], summary['segments'], summary['cells'])

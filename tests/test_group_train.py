@@ -17,10 +17,11 @@ class HardSegmentGroupTests(unittest.TestCase):
 
     def test_cell_boundaries_and_contiguous_segments(self) -> None:
         observations = _observations()
-        config = HardSegmentConfig(3000.0, 6000.0, 1200.0, 0.5)
+        config = HardSegmentConfig()
         cells = assign_cells(observations, config, 0)
         self.assertEqual(cells['height_band'].tolist(), [0, 0, 1, 2])
         self.assertEqual(cells['time_bucket'].tolist(), [0, 0, 1, 1])
+        self.assertEqual(cells['longitude_cell'].tolist(), [600, 600, 100, 25])
         with tempfile.TemporaryDirectory() as directory:
             result = segment_observations(observations, Path(directory), config, 0, _Logger())
             segments = read_table(Path(directory), 'segments')
@@ -53,7 +54,7 @@ class HardSegmentGroupTests(unittest.TestCase):
 def _observations() -> pd.DataFrame:
     return pd.DataFrame({
         'record_id': ['r0', 'r1', 'r2', 'r3'], 'flight_id': ['F'] * 4, 'icao': ['ICAO'] * 4, 'call': ['CALL'] * 4,
-        'time_ns': [0, 1_000_000_000, 1_201_000_000_000, 1_202_000_000_000],
+        'time_ns': [0, 1_000_000_000, 1_801_000_000_000, 7_201_000_000_000],
         'longitude_deg': [120.0, 120.1, 120.1, 120.1], 'latitude_deg': [30.0] * 4,
         'geometric_altitude_m': [100.0, 2999.0, 3000.0, 6000.0], 'injected_label': [0] * 4,
         'split': ['train'] * 4, 'injection_plan': ['normal'] * 4,

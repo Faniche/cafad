@@ -26,18 +26,39 @@ class HardSegmentConfig:
 
     lower_height_m: float = 3000.0
     upper_height_m: float = 6000.0
-    time_bucket_seconds: float = 1200.0
-    grid_degrees: float = 0.5
+    low_time_bucket_seconds: float = 1200.0
+    middle_time_bucket_seconds: float = 1800.0
+    high_time_bucket_seconds: float = 7200.0
+    low_grid_degrees: float = 0.5
+    middle_grid_degrees: float = 3.0
+    high_grid_degrees: float = 12.0
 
     def validate(self) -> None:
-        if not (np.isfinite([self.lower_height_m, self.upper_height_m, self.time_bucket_seconds, self.grid_degrees]).all()
-                and 0.0 <= self.lower_height_m < self.upper_height_m
-                and self.time_bucket_seconds > 0.0 and self.grid_degrees > 0.0):
-            raise ValueError('高度边界、时间桶和空间网格必须是有效的正数，且 lower < upper')
+        values = [self.lower_height_m, self.upper_height_m, self.low_time_bucket_seconds,
+                  self.middle_time_bucket_seconds, self.high_time_bucket_seconds,
+                  self.low_grid_degrees, self.middle_grid_degrees, self.high_grid_degrees]
+        if not (np.isfinite(values).all() and 0.0 <= self.lower_height_m < self.upper_height_m
+                and all(value > 0.0 for value in values[2:])):
+            raise ValueError('高度边界及各高度层的时间桶、空间网格必须为有效正数，且 lower < upper')
+
+    def time_bucket_widths(self) -> np.ndarray:
+        """按低、中、高高度层给出时间桶宽度，索引与 height_band 一一对应。"""
+        return np.asarray((self.low_time_bucket_seconds, self.middle_time_bucket_seconds,
+                           self.high_time_bucket_seconds), dtype=np.float64)
+
+    def grid_widths(self) -> np.ndarray:
+        """按低、中、高高度层给出经纬网格边长，索引与 height_band 一一对应。"""
+        return np.asarray((self.low_grid_degrees, self.middle_grid_degrees,
+                           self.high_grid_degrees), dtype=np.float64)
 
     def as_dict(self) -> dict[str, float]:
         return {'lower_height_m': self.lower_height_m, 'upper_height_m': self.upper_height_m,
-                'time_bucket_seconds': self.time_bucket_seconds, 'grid_degrees': self.grid_degrees}
+                'low_time_bucket_seconds': self.low_time_bucket_seconds,
+                'middle_time_bucket_seconds': self.middle_time_bucket_seconds,
+                'high_time_bucket_seconds': self.high_time_bucket_seconds,
+                'low_grid_degrees': self.low_grid_degrees,
+                'middle_grid_degrees': self.middle_grid_degrees,
+                'high_grid_degrees': self.high_grid_degrees}
 
 
 def _haversine_km(longitudes: np.ndarray, latitudes: np.ndarray) -> float:
@@ -59,10 +80,13 @@ def assign_cells(observations: pd.DataFrame, config: HardSegmentConfig, time_ori
     config.validate()
     result = observations.copy()
     altitude = result['geometric_altitude_m'].to_numpy(dtype=np.float64)
-    result['height_band'] = np.select((altitude < config.lower_height_m, altitude < config.upper_height_m), (0, 1), default=2).astype(np.int8)
-    result['time_bucket'] = np.floor((result['time_ns'].to_numpy(dtype=np.int64) - int(time_origin_ns)) / (config.time_bucket_seconds * 1e9)).astype(np.int64)
-    result['longitude_cell'] = np.floor((result['longitude_deg'].to_numpy(dtype=np.float64) + 180.0) / config.grid_degrees).astype(np.int32)
-    result['latitude_cell'] = np.floor((result['latitude_deg'].to_numpy(dtype=np.float64) + 90.0) / config.grid_degrees).astype(np.int32)
+    bands = np.select((altitude < config.lower_height_m, altitude < config.upper_height_m), (0, 1), default=2).astype(np.int8)
+    time_widths = config.time_bucket_widths()[bands]
+    grid_widths = config.grid_widths()[bands]
+    result['height_band'] = bands
+    result['time_bucket'] = np.floor((result['time_ns'].to_numpy(dtype=np.int64) - int(time_origin_ns)) / (time_widths * 1e9)).astype(np.int64)
+    result['longitude_cell'] = np.floor((result['longitude_deg'].to_numpy(dtype=np.float64) + 180.0) / grid_widths).astype(np.int32)
+    result['latitude_cell'] = np.floor((result['latitude_deg'].to_numpy(dtype=np.float64) + 90.0) / grid_widths).astype(np.int32)
     result['cell_key'] = ['h%d_t%d_x%d_y%d' % values for values in zip(result['height_band'], result['time_bucket'], result['longitude_cell'], result['latitude_cell'], strict=True)]
     return result
 

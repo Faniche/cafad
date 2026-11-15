@@ -102,7 +102,8 @@ class DataModulePipelineTests(unittest.TestCase):
             })
             self.run_command([
                 '-m', 'segment', '--input', str(split_dir / 'manifest.json'),
-                '--grid-degrees', '360', '--time-bucket-seconds', '3600',
+                '--low-grid-degrees', '360', '--middle-grid-degrees', '360', '--high-grid-degrees', '360',
+                '--low-time-bucket-seconds', '3600', '--middle-time-bucket-seconds', '3600', '--high-time-bucket-seconds', '3600',
             ], base)
             segment_dir = next((base / 'data' / '2_segment' / 'preprocessed_data_fixture').iterdir())
             mapping = read_table(segment_dir / 'data', 'point_segment_map')
