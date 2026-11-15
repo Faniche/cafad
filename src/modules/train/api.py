@@ -105,14 +105,14 @@ def _load_sequences(segment_manifest: Path, observation_manifest: Path | None = 
     return _load_sequences_from_data(data, mapping_data)
 
 
-def _stats(reference_ids: list[str], sequences: dict[str, pd.DataFrame]) -> dict[str, list[float]]:
+def _stats(reference_ids: list[str], sequences: dict[str, pd.DataFrame]) -> dict:
     """仅由该专家正常参考的有效观测拟合输入统计量。"""
     values = pd.concat([sequences[item] for item in reference_ids], ignore_index=True)
     names = ['longitude_deg', 'latitude_deg', 'geometric_altitude_m', 'barometric_altitude_m', 'speed_mps']
     mean = values[names].mean().to_numpy(dtype=np.float32)
     std = values[names].std(ddof=0).to_numpy(dtype=np.float32)
     std[std == 0] = 1.0
-    return {'names': names, 'mean': mean.tolist(), 'std': std.tolist()}
+    return {'names': names, 'mean': mean.tolist(), 'std': std.tolist(), 'time_encoding': 'relative_ns_v1'}
 
 
 def _tensor(frame: pd.DataFrame, stats: dict[str, list[float]], device: torch.device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:

@@ -11,10 +11,22 @@ import torch
 from src.modules.detect.scoring import score_pairs
 from src.modules.train.model import ExpertModel
 from src.modules.train.api import _stats
+from src.modules.train.batching import collate_frames
 from src.modules.evaluate.metrics import binary_metrics, align_segments
 
 
 class ScoringEvaluationTests(unittest.TestCase):
+    def test_relative_time_preserves_milliseconds_and_legacy_mode(self) -> None:
+        frame = _sequence(0)
+        start = 1716253200475000000
+        frame['time_ns'] = [start, start + 49_000_000, start + 1_234_000_000]
+        stats = _stats(['s'], {'s': frame})
+        _, _, times, _ = collate_frames([frame], stats, torch.device('cpu'))
+        np.testing.assert_allclose(times.numpy()[0], [0.0, 0.049, 1.234], atol=1e-6)
+        legacy = {key: value for key, value in stats.items() if key != 'time_encoding'}
+        _, _, old_times, _ = collate_frames([frame], legacy, torch.device('cpu'))
+        self.assertEqual(float(old_times[0, 0]), float(np.float32(start / 1e9)))
+
     def test_single_and_multiple_devices_agree(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

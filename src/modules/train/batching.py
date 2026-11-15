@@ -27,8 +27,14 @@ def collate_frames(frames: list[pd.DataFrame], stats: dict, device: torch.device
         heading = np.deg2rad(frame['heading_deg'].to_numpy(dtype=np.float32))
         space[index, :length] = normalized[:, :4]
         kinematic[index, :length] = np.column_stack((normalized[:, 4], np.sin(heading), np.cos(heading)))
-        # 保持旧检查点的时间输入约定；时间精度修订需单独版本化，不能悄然改变旧模型推理。
-        times[index, :length] = (frame['time_ns'].to_numpy(dtype=np.float64) / 1e9).astype(np.float32)
+        timestamps = frame['time_ns'].to_numpy(dtype=np.int64)
+        time_mode = stats.get('time_encoding', 'legacy_absolute_float32')
+        if time_mode == 'relative_ns_v1':
+            times[index, :length] = ((timestamps - timestamps[0]) / 1e9).astype(np.float32)
+        elif time_mode == 'legacy_absolute_float32':
+            times[index, :length] = (timestamps.astype(np.float64) / 1e9).astype(np.float32)
+        else:
+            raise ValueError(f'未知的时间编码版本：{time_mode}')
         times[index, length:] = times[index, length - 1]
         mask[index, :length] = False
     return tuple(torch.from_numpy(value).to(device) for value in (space, kinematic, times, mask))
