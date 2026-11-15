@@ -29,6 +29,6 @@
     "dropout": {"choices": [0.0, 0.1, 0.2, 0.3]},
     "weight_decay": {"low": 0.00001, "high": 0.01, "log": true}
   },
-  "calibrate": {"top_r": 3, "temperature": 1.0, "score_task_size": 32},
-  "detect": {"split": "val", "score_task_size": 32}
+  "calibrate": {"score_task_size": 32},
+  "detect": {"split": "test", "score_task_size": 32}
 }

@@ -18,26 +18,26 @@ from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
-from src.utils.phase_palette import phase_color
+from src.utils.hard_cell_palette import cell_color
 from .history import _artifact_directory
 
 
-MAX_POINTS_PER_PHASE = 600
+MAX_POINTS_PER_CELL = 600
 MINIMUM_ALTITUDE_AXIS_UPPER_METERS = 15_000.0
 _FLIGHT_ID = re.compile(r'[A-Za-z0-9_-]+\Z')
-_CACHE_MARKER = b'<!-- CAFAD phase trajectory plot v5 -->\n'
+_CACHE_MARKER = b'<!-- CAFAD hard-cell trajectory plot v6 -->\n'
 
 
 def segment_flight_svg(project_root: Path, artifact: str, flight_id: str) -> bytes:
-    """生成或读取统一阶段配色的静态 SVG，供离线查看和接口兼容使用。"""
+    """生成或读取统一硬单元配色的静态 SVG，供离线查看和接口兼容使用。"""
     directory = _validated_directory(project_root, artifact, flight_id)
     cached = _flight_svg_path(directory, flight_id)
     if cached.is_file():
         image = cached.read_bytes()
         if image.startswith(_CACHE_MARKER):
             return image
-    phase_paths, flight_path = _read_flight_paths(directory, flight_id)
-    image = _CACHE_MARKER + _draw_flight_svg(flight_id, phase_paths, flight_path)
+    cell_paths, flight_path = _read_flight_paths(directory, flight_id)
+    image = _CACHE_MARKER + _draw_flight_svg(flight_id, cell_paths, flight_path)
     _write_cached(cached, image)
     return image
 
@@ -50,8 +50,8 @@ def segment_flight_html(project_root: Path, artifact: str, flight_id: str) -> by
         page = cached.read_bytes()
         if _CACHE_MARKER in page[:512]:
             return page
-    phase_paths, flight_path = _read_flight_paths(directory, flight_id)
-    page = _CACHE_MARKER + _draw_flight_html(flight_id, phase_paths, flight_path)
+    cell_paths, flight_path = _read_flight_paths(directory, flight_id)
+    page = _CACHE_MARKER + _draw_flight_html(flight_id, cell_paths, flight_path)
     _write_cached(cached, page)
     return page
 
@@ -63,7 +63,7 @@ def plotly_javascript() -> bytes:
 
 
 def invalidate_segment_flight_svgs(directory: Path, flight_ids: set[str]) -> None:
-    """标签人工修订后同时删除静态和交互式预览缓存。"""
+    """保留缓存失效接口，供未来受控数据修订时同时删除静态和交互式预览。"""
     for flight_id in flight_ids:
         if _FLIGHT_ID.fullmatch(flight_id):
             _flight_svg_path(directory, flight_id).unlink(missing_ok=True)
@@ -104,44 +104,44 @@ def _read_flight_paths(directory: Path, flight_id: str) -> tuple[dict[str, list[
         raise ValueError('该 segment 运行尚未发布可绘图的点映射或观测表')
     with duckdb.connect(':memory:') as database:
         points = database.execute(
-            'SELECT mapping.segment_id, mapping.phase, mapping.time_ns, '
+            'SELECT mapping.segment_id, mapping.cell_key, mapping.time_ns, '
             'observations.longitude_deg, observations.latitude_deg, observations.geometric_altitude_m '
             'FROM read_parquet(?) AS mapping JOIN read_parquet(?) AS observations USING (record_id) '
             'WHERE mapping.flight_id = ? ORDER BY mapping.time_ns, mapping.segment_id',
             [str(mapping), str(observations), flight_id],
         ).fetchall()
     if not points:
-        raise ValueError('航班没有可绘制的阶段观测')
+        raise ValueError('航班没有可绘制的硬分段观测')
     by_segment: dict[tuple[str, str], list[tuple[float, float, float, float]]] = {}
     ordered: list[tuple[float, float, float, float]] = []
-    for segment_id, phase, time_ns, longitude, latitude, altitude in points:
+    for segment_id, cell_key, time_ns, longitude, latitude, altitude in points:
         if None in (time_ns, longitude, latitude, altitude):
             continue
         value = (float(time_ns), float(longitude), float(latitude), float(altitude))
-        by_segment.setdefault((str(phase), str(segment_id)), []).append(value)
+        by_segment.setdefault((str(cell_key), str(segment_id)), []).append(value)
         ordered.append(value)
     if not ordered:
         raise ValueError('航班经纬度或几何高度均无有效值，无法绘图')
-    phase_paths: dict[str, list[np.ndarray]] = {}
-    for (phase, _segment_id), values in by_segment.items():
+    cell_paths: dict[str, list[np.ndarray]] = {}
+    for (cell_key, _segment_id), values in by_segment.items():
         path = np.asarray(values, dtype=float)[:, 1:4]
-        if len(path) > MAX_POINTS_PER_PHASE:
-            path = path[np.linspace(0, len(path) - 1, MAX_POINTS_PER_PHASE, dtype=int)]
-        phase_paths.setdefault(phase, []).append(path)
+        if len(path) > MAX_POINTS_PER_CELL:
+            path = path[np.linspace(0, len(path) - 1, MAX_POINTS_PER_CELL, dtype=int)]
+        cell_paths.setdefault(cell_key, []).append(path)
     flight_path = np.asarray(ordered, dtype=float)
     flight_path = flight_path[np.argsort(flight_path[:, 0], kind='stable')][:, 1:4]
-    return phase_paths, flight_path
+    return cell_paths, flight_path
 
 
-def _draw_flight_svg(flight_id: str, phase_paths: dict[str, list[np.ndarray]], flight_path: np.ndarray) -> bytes:
-    """绘制静态 SVG；颜色固定，首点为小星标、终段为方向箭头。"""
+def _draw_flight_svg(flight_id: str, cell_paths: dict[str, list[np.ndarray]], flight_path: np.ndarray) -> bytes:
+    """绘制静态 SVG；硬单元颜色固定，首点为小星标、终段为方向箭头。"""
     figure = plt.figure(figsize=(10, 10), constrained_layout=True)
     axis = figure.add_subplot(projection='3d')
-    phases = sorted(phase_paths)
+    cells = sorted(cell_paths)
     all_points: list[np.ndarray] = []
-    for phase in phases:
-        paths = phase_paths[phase]
-        axis.add_collection3d(Line3DCollection(paths, colors=[phase_color(phase)], linewidths=1.15, alpha=0.88))
+    for cell_key in cells:
+        paths = cell_paths[cell_key]
+        axis.add_collection3d(Line3DCollection(paths, colors=[cell_color(cell_key)], linewidths=1.15, alpha=0.88))
         all_points.extend(paths)
     coordinates = np.concatenate(all_points)
     axis.auto_scale_xyz(coordinates[:, 0], coordinates[:, 1], coordinates[:, 2])
@@ -150,9 +150,9 @@ def _draw_flight_svg(flight_id: str, phase_paths: dict[str, list[np.ndarray]], f
     axis.set_xlabel('Longitude (deg)')
     axis.set_ylabel('Latitude (deg)')
     axis.set_zlabel('Geometric altitude (m)')
-    axis.set_title(f'Flight {flight_id[:12]}: {len(all_points)} phase paths')
-    axis.legend([Line2D([0], [0], color=phase_color(phase), lw=2) for phase in phases], phases,
-                title='Phase', loc='best', fontsize=8)
+    axis.set_title(f'Flight {flight_id[:12]}: {len(all_points)} hard-cell paths')
+    axis.legend([Line2D([0], [0], color=cell_color(cell_key), lw=2) for cell_key in cells], cells,
+                title='Hard cell', loc='best', fontsize=8)
     output = BytesIO()
     figure.savefig(output, format='svg')
     plt.close(figure)
@@ -178,20 +178,20 @@ def _add_svg_end_markers(axis: object, flight_path: np.ndarray) -> None:
     axis.quiver(*previous, *direction, color='#111827', linewidth=0.75, arrow_length_ratio=0.12, normalize=False)
 
 
-def _draw_flight_html(flight_id: str, phase_paths: dict[str, list[np.ndarray]], flight_path: np.ndarray) -> bytes:
-    """生成浏览器原生旋转／缩放的 Plotly 三维页面，沿用静态图阶段色。"""
+def _draw_flight_html(flight_id: str, cell_paths: dict[str, list[np.ndarray]], flight_path: np.ndarray) -> bytes:
+    """生成浏览器原生旋转／缩放的 Plotly 三维页面，沿用静态图硬单元色。"""
     figure = go.Figure()
-    for phase in sorted(phase_paths):
+    for cell_key in sorted(cell_paths):
         x_values: list[float | None] = []
         y_values: list[float | None] = []
         z_values: list[float | None] = []
-        for path in phase_paths[phase]:
+        for path in cell_paths[cell_key]:
             x_values.extend(path[:, 0].tolist() + [None])
             y_values.extend(path[:, 1].tolist() + [None])
             z_values.extend(path[:, 2].tolist() + [None])
         figure.add_trace(go.Scatter3d(
-            x=x_values, y=y_values, z=z_values, mode='lines', name=phase,
-            line={'color': phase_color(phase), 'width': 4}, hovertemplate=f'{phase}<extra></extra>',
+            x=x_values, y=y_values, z=z_values, mode='lines', name=cell_key,
+            line={'color': cell_color(cell_key), 'width': 4}, hovertemplate=f'{cell_key}<extra></extra>',
         ))
     figure.add_trace(go.Scatter3d(
         x=[flight_path[0, 0]], y=[flight_path[0, 1]], z=[flight_path[0, 2]], mode='text',
@@ -203,9 +203,9 @@ def _draw_flight_html(flight_id: str, phase_paths: dict[str, list[np.ndarray]], 
     ))
     altitude_upper = _altitude_axis_upper(flight_path[:, 2])
     figure.update_layout(
-        title=f'Flight {flight_id[:12]}: phase paths',
+        title=f'Flight {flight_id[:12]}: hard-cell paths',
         margin={'l': 0, 'r': 0, 'b': 0, 't': 42},
-        legend={'title': {'text': 'Phase'}},
+        legend={'title': {'text': 'Hard cell'}},
         scene={
             'dragmode': 'orbit',
             'xaxis_title': 'Longitude (deg)', 'yaxis_title': 'Latitude (deg)',

@@ -665,22 +665,11 @@ async function loadHistoryDetail(moduleName, artifact) {
     }
     if (moduleName === 'segment') {
       segmentResult.hidden = false;
-      const savePhases = async (segmentIds, phase) => {
-        const saved = await apiRequest('/api/segment/phases', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ artifact, segment_ids: segmentIds, phase }),
-        });
-        clearSegmentSelection();
-        historyStatus.textContent = saved.changed_segments
-          ? `已修改 ${saved.changed_segments} 个片段为 ${saved.phase}。`
-          : '所选片段标签没有变化。';
-        await loadHistoryDetail('segment', artifact);
-      };
       const refresh = async () => {
         try {
           const result = await apiRequest(`/api/segment/result?artifact=${encodeURIComponent(artifact)}`);
-          if (selectedModule === 'segment' && version === detailVersion) renderSegmentResult(segmentResult, result, artifact, savePhases);
-        } catch (error) { if (version === detailVersion) segmentResult.textContent = `阶段进度读取失败：${error.message}`; }
+          if (selectedModule === 'segment' && version === detailVersion) renderSegmentResult(segmentResult, result, artifact);
+        } catch (error) { if (version === detailVersion) segmentResult.textContent = `硬分段进度读取失败：${error.message}`; }
       };
       await refresh();
       if (data.entry?.state === 'running') segmentTimer = setInterval(refresh, 1000);

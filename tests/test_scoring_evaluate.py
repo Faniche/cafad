@@ -12,7 +12,6 @@ from src.modules.detect.scoring import score_pairs
 from src.modules.train.model import ExpertModel
 from src.modules.train.api import _stats
 from src.modules.evaluate.metrics import binary_metrics, align_segments
-from tests.test_group_train import _sequence
 
 
 class ScoringEvaluationTests(unittest.TestCase):
@@ -43,7 +42,7 @@ class ScoringEvaluationTests(unittest.TestCase):
         self.assertEqual(result['f1'], .5)
         self.assertIsNone(binary_metrics(np.array([]), np.array([]))['f1'])
         self.assertIn('recall', binary_metrics(np.array([0]), np.array([0]))['undefined_metrics'])
-        predicted = pd.DataFrame({'segment_id': ['a'], 'flight_id': ['f'], 'phase': ['CR'], 'split': ['test'], 'score': [.2]})
+        predicted = pd.DataFrame({'segment_id': ['a'], 'flight_id': ['f'], 'cell_key': ['h2_t0_x1_y1'], 'split': ['test'], 'score': [.2]})
         truth = predicted.drop(columns='score').assign(segment_label=0)
         self.assertEqual(len(align_segments(predicted, truth)), 1)
         with self.assertRaises(ValueError):
@@ -59,7 +58,7 @@ class ScoringEvaluationTests(unittest.TestCase):
             source.write_text(json.dumps({'module': 'detect', 'status': 'SUCCEEDED', 'dataset_id': 'fixture',
                                            'outputs': [], 'dependencies': []}), encoding='utf-8')
             segments = pd.DataFrame({'segment_id': ['a', 'b'], 'segment_label': [0, 1], 'prediction': [0, 1],
-                                      'phase': ['CR', 'NA'], 'route_mode': ['same_phase', 'fallback']})
+                                      'cell_key': ['h2_t0_x1_y1', 'h0_t1_x2_y2'], 'route_mode': ['hard_exact', 'fallback_all_groups']})
             flights = pd.DataFrame({'flight_id': ['f'], 'label': [1], 'prediction': [1]})
             with patch.object(PathUtils, 'get_project_root', return_value=root), patch(
                     'src.modules.evaluate.api.read_evaluation', return_value=(segments, flights, 'test')):
@@ -67,3 +66,15 @@ class ScoringEvaluationTests(unittest.TestCase):
             output = next((root / 'data/8_evaluate/fixture').iterdir())
             metrics = json.loads((output / 'data/metrics.json').read_text(encoding='utf-8'))
             self.assertEqual(metrics['segment']['f1'], 1)
+
+
+def _sequence(offset: int) -> pd.DataFrame:
+    return pd.DataFrame({
+        'record_id': [f'{offset}-0', f'{offset}-1', f'{offset}-2'],
+        'time_ns': [0, 1_000_000_000, 2_000_000_000],
+        'longitude_deg': [120.0 + offset, 120.01 + offset, 120.02 + offset],
+        'latitude_deg': [30.0, 30.01, 30.02],
+        'geometric_altitude_m': [100.0, 110.0, 120.0],
+        'barometric_altitude_m': [95.0, 105.0, 115.0],
+        'heading_deg': [90.0, 90.0, 90.0], 'speed_mps': [40.0, 42.0, 44.0],
+    })

@@ -55,10 +55,10 @@ input:focus, select:focus { outline: 2px solid #38bdf8; outline-offset: 1px; }
 .checkbox input { width: auto; accent-color: #38bdf8; }
 .hint, .inline-note, .dialog-note { margin: -2px 0 0; color: #94a3b8; font-size: .82rem; }
 .actions { display: flex; gap: 16px; align-items: center; margin-top: 12px; }
-.phase-filter-options { display: flex; flex-wrap: wrap; gap: 7px 12px; align-items: center; margin: 0; padding: 0; border: 0; color: #cbd5e1; font-size: .88rem; }
-.phase-filter-options legend { width: 100%; padding: 0; }
-.phase-filter-options label { display: flex; gap: 5px; align-items: center; white-space: nowrap; }
-.phase-filter-options input { width: auto; accent-color: #38bdf8; }
+.hard-cell-filter-options { display: flex; flex-wrap: wrap; gap: 7px 12px; align-items: center; margin: 0; padding: 0; border: 0; color: #cbd5e1; font-size: .88rem; }
+.hard-cell-filter-options legend { width: 100%; padding: 0; }
+.hard-cell-filter-options label { display: flex; gap: 5px; align-items: center; white-space: nowrap; }
+.hard-cell-filter-options input { width: auto; accent-color: #38bdf8; }
 .form-status { min-height: 1.2em; color: #fda4af; }
 .output-heading { display: flex; justify-content: space-between; gap: 20px; align-items: center; }
 .output-heading h3 { margin: 0; }

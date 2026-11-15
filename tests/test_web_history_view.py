@@ -64,7 +64,7 @@ def segment_plot_fixture(root: Path) -> Path:
     write_table(pd.DataFrame({
         'record_id': ['p0', 'p1', 'p2', 'p3'], 'flight_id': ['plot-flight'] * 4,
         'segment_id': ['plot-flight:0', 'plot-flight:0', 'plot-flight:1', 'plot-flight:1'],
-        'phase': ['climb', 'climb', 'cruise', 'cruise'], 'time_ns': [1, 2, 3, 4],
+        'cell_key': ['h0_t0_x1_y1', 'h0_t0_x1_y1', 'h2_t0_x1_y1', 'h2_t0_x1_y1'], 'time_ns': [1, 2, 3, 4],
     }), data, 'point_segment_map')
     return segment
 
@@ -88,16 +88,17 @@ class WebHistoryViewTests(unittest.TestCase):
             database = sqlite3.connect(data / 'segment_progress.sqlite')
             try:
                 database.execute('''CREATE TABLE segments (
-                    segment_id TEXT PRIMARY KEY, flight_id TEXT, icao TEXT, call TEXT, phase TEXT, points INTEGER,
+                    segment_id TEXT PRIMARY KEY, flight_id TEXT, icao TEXT, call TEXT, cell_key TEXT, height_band INTEGER,
+                    time_bucket INTEGER, longitude_cell INTEGER, latitude_cell INTEGER, points INTEGER,
                     start_time TEXT, end_time TEXT, duration_seconds REAL, start_longitude_deg REAL,
                     start_latitude_deg REAL, end_longitude_deg REAL, end_latitude_deg REAL, span_km REAL,
                     start_altitude_m REAL, end_altitude_m REAL)''')
-                database.executemany('INSERT INTO segments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [
-                    ('f1:1', 'f1', 'ABC001', 'CAF001', 'CR', 8, '2024-01-01T00:01:00+00:00',
+                database.executemany('INSERT INTO segments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [
+                    ('f1:1', 'f1', 'ABC001', 'CAF001', 'h2_t0_x1_y1', 2, 0, 1, 1, 8, '2024-01-01T00:01:00+00:00',
                      '2024-01-01T00:02:00+00:00', 60.0, 120.1, 30.1, 120.2, 30.2, 14.7, 1100.0, 1200.0),
-                    ('f2:0', 'f2', 'ABC001', 'CAF001', 'CL', 8, '2024-01-01T00:00:00+00:00',
+                    ('f2:0', 'f2', 'ABC001', 'CAF001', 'h1_t0_x1_y1', 1, 0, 1, 1, 8, '2024-01-01T00:00:00+00:00',
                      '2024-01-01T00:01:00+00:00', 60.0, 120.0, 30.0, 120.1, 30.1, 14.7, 1000.0, 1100.0),
-                    ('f3:0', 'f3', 'ZZZ001', 'ZZZ001', 'DE', 8, '2024-01-01T00:00:00+00:00',
+                    ('f3:0', 'f3', 'ZZZ001', 'ZZZ001', 'h0_t0_x1_y1', 0, 0, 1, 1, 8, '2024-01-01T00:00:00+00:00',
                      '2024-01-01T00:01:00+00:00', 60.0, 120.0, 30.0, 120.1, 30.1, 14.7, 1000.0, 1100.0),
                 ])
                 database.commit()
@@ -146,15 +147,15 @@ class WebHistoryViewTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 group_result(root, '../outside')
 
-    def test_segment_flight_plot_returns_phase_colored_svg(self) -> None:
-        """航班 ID 图接口只查询该航班，生成包含阶段图例的 SVG。"""
+    def test_segment_flight_plot_returns_hard_cell_colored_svg(self) -> None:
+        """航班 ID 图接口只查询该航班，生成包含硬单元图例的 SVG。"""
         with TemporaryDirectory() as directory:
             root = Path(directory)
             segment = segment_plot_fixture(root)
             artifact = segment.relative_to(root).as_posix()
             image = segment_flight_svg(root, artifact, 'plot-flight')
             self.assertIn(b'<svg', image)
-            self.assertIn(b'climb', image)
+            self.assertIn(b'h0_t0_x1_y1', image)
             self.assertIn(b'width="720pt"', image)
             cache = segment / 'flight_trajectory_svg' / 'plot-flight.svg'
             self.assertTrue(cache.is_file())
@@ -169,7 +170,7 @@ class WebHistoryViewTests(unittest.TestCase):
                     self.assertIn(b'<svg', response.read())
 
     def test_segment_flight_plot_returns_interactive_html(self) -> None:
-        """交互式端点保存 Plotly HTML，并保留固定阶段色和起止标记。"""
+        """交互式端点保存 Plotly HTML，并保留稳定硬单元色和起止标记。"""
         with TemporaryDirectory() as directory:
             root = Path(directory)
             segment = segment_plot_fixture(root)
@@ -178,7 +179,7 @@ class WebHistoryViewTests(unittest.TestCase):
             self.assertIn(b'Plotly.newPlot', page)
             self.assertIn(b'\\u2605', page)
             self.assertIn(b'\\u27a4', page)
-            self.assertIn(b'#16a34a', page)
+            self.assertIn(b'h2_t0_x1_y1', page)
             self.assertIn(b'/api/segment/plotly.min.js', page)
             cache = segment / 'flight_trajectory_html' / 'plot-flight.html'
             self.assertTrue(cache.is_file())

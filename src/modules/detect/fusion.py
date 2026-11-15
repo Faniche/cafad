@@ -2,13 +2,6 @@
 import numpy as np
 import pandas as pd
 
-
-def fuse_candidates(scores: np.ndarray, distances: np.ndarray, temperature: float) -> float:
-    """稳定 softmax 距离权重。"""
-    weights = np.exp(-(distances - distances.min()) / temperature)
-    return float(np.dot(scores, weights / weights.sum()))
-
-
 def fallback_score(scores: np.ndarray) -> float:
     """严格多数最短窗口；并列比较与全体中位数距离、起始索引。"""
     values = np.sort(scores, kind='stable')

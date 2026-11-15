@@ -15,18 +15,14 @@ from .threshold import select_segment_threshold
 def build_parser() -> argparse.ArgumentParser:
     parser = ProjectArgumentParser(prog='main.py -m calibrate', description='用完整验证集固定检测阈值。')
     parser.add_argument('--input', required=True, type=Path, help='train 已发布的 manifest.json')
-    parser.add_argument('--top-r', type=int, default=3)
-    parser.add_argument('--temperature', type=float, default=1.0)
     parser.add_argument('--gpus', default='0,1,2,3', help='参与评分的 GPU，例如 0,1,2,3；空闲设备领取任务')
     parser.add_argument('--score-task-size', type=int, default=32, help='每个专家评分任务的片段数，批内逐片段前向')
     return parser
 
 
 def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
-    if args.top_r < 1 or not np.isfinite(args.temperature) or args.temperature <= 0:
-        raise ValueError('top-r 必须为正整数，temperature 必须为有限正数')
     trained = (context.project_root / args.input).resolve()
-    scores, pairs, _ = score_partition(trained, 'val', args.top_r, args.temperature, args.gpus,
+    scores, pairs, _ = score_partition(trained, 'val', args.gpus,
                                         context.logger, context.workers, args.score_task_size)
     threshold, scan = select_segment_threshold(scores['score'].to_numpy(), scores['segment_label'].to_numpy())
     data = context.staging_dir / 'data'; data.mkdir()
@@ -34,8 +30,8 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
     write_table(pairs, data, 'val_expert_scores')
     write_table(scan, data, 'threshold_scan')
     write_json(context.staging_dir / 'system_bundle.json', {'schema_version': 1, 'train_manifest': str(trained),
-               'threshold': threshold, 'top_r': args.top_r, 'temperature': args.temperature,
-               'fusion': 'distance-weighted', 'fallback': 'majority-interval', 'comparison': '>='})
+               'threshold': threshold, 'fusion': 'hard-cell-exact',
+               'fallback': 'majority-interval-all-experts', 'comparison': '>='})
     context.logger.info('校准完成：validation=%d；threshold=%.8f；F1=%.6f', len(scores), threshold, scan['f1'].max())
     return ModuleResult(summary={'validation_segments': len(scores), 'threshold': threshold, 'validation_f1': float(scan['f1'].max())},
                         dependencies=(trained,))

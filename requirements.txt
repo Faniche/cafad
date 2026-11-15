@@ -5,7 +5,6 @@ torch
 numpy
 pandas
 scipy
-scikit-learn
 
 # Visualization
 matplotlib

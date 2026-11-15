@@ -7,7 +7,6 @@ from http import HTTPStatus
 from http.server import ThreadingHTTPServer
 import json
 from pathlib import Path
-import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 import threading
@@ -17,15 +16,11 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-import pandas as pd
-
 from src.web_console.server import create_handler
 from src.web_console.restart import RestartController
 from src.web_console.history import delete_history_run, history_detail, list_module_history
-from src.web_console.segment_view import segment_result, update_segment_phases
 from src.web_console.service import JobManager, build_command, module_schemas
 from src.app.module_catalog import artifact_module_directory
-from src.app.tables import read_table, write_table
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -214,74 +209,6 @@ class WebConsoleTests(unittest.TestCase):
             self.assertTrue(other_preprocess.exists())
             self.assertTrue(independent_split.exists())
 
-    def test_segment_phase_edit_updates_linked_records_and_blocks_descendants(self) -> None:
-        """人工修订必须同步正式片段、逐点、实时表和审计，且不能改写已有下游输入。"""
-        with TemporaryDirectory() as directory:
-            project_root = Path(directory)
-            segment = self._write_history_run(project_root, 'segment', 'fixture', '1#20261113_160000#42')
-            config_path = segment / 'resolved_config.json'
-            config = json.loads(config_path.read_text(encoding='utf-8'))
-            config_path.write_text(json.dumps(config), encoding='utf-8')
-            data_dir = segment / 'data'
-            data_dir.mkdir()
-            write_table(pd.DataFrame([
-                {'segment_id': 'seg-1', 'flight_id': 'flight-1', 'icao': 'ABC001', 'call': 'CALL1',
-                 'phase': 'CL', 'ordinal': 0, 'points': 2, 'start_time': '2026-11-13T00:00:00+00:00',
-                 'end_time': '2026-11-13T00:00:01+00:00'},
-                {'segment_id': 'seg-2', 'flight_id': 'flight-1', 'icao': 'ABC001', 'call': 'CALL1',
-                 'phase': 'CR', 'ordinal': 1, 'points': 1, 'start_time': '2026-11-13T00:00:02+00:00',
-                 'end_time': '2026-11-13T00:00:02+00:00'},
-            ]), data_dir, 'segments')
-            write_table(pd.DataFrame([
-                {'record_id': 'record-1', 'flight_id': 'flight-1', 'time_ns': 1, 'segment_id': 'seg-1', 'phase': 'CL'},
-                {'record_id': 'record-2', 'flight_id': 'flight-1', 'time_ns': 2, 'segment_id': 'seg-1', 'phase': 'CL'},
-                {'record_id': 'record-3', 'flight_id': 'flight-1', 'time_ns': 3, 'segment_id': 'seg-2', 'phase': 'CR'},
-            ]), data_dir, 'point_segment_map')
-            database = sqlite3.connect(data_dir / 'segment_progress.sqlite')
-            try:
-                database.execute(
-                    'CREATE TABLE segments (segment_id TEXT PRIMARY KEY, flight_id TEXT, icao TEXT, call TEXT, phase TEXT, '
-                    'points INTEGER, start_time TEXT, end_time TEXT, duration_seconds REAL, start_longitude_deg REAL, '
-                    'start_latitude_deg REAL, end_longitude_deg REAL, end_latitude_deg REAL, span_km REAL, '
-                    'start_altitude_m REAL, end_altitude_m REAL)'
-                )
-                database.executemany(
-                    'INSERT INTO segments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                    [('seg-1', 'flight-1', 'ABC001', 'CALL1', 'CL', 2, 'a', 'b', 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0),
-                     ('seg-2', 'flight-1', 'ABC001', 'CALL1', 'CR', 1, 'c', 'd', 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 2.0)],
-                )
-                database.commit()
-            finally:
-                database.close()
-            artifact = segment.relative_to(project_root).as_posix()
-            initial = segment_result(project_root, artifact)
-            self.assertTrue(initial['editable'])
-            self.assertEqual({row['phase_source'] for row in initial['rows']}, {'sun'})
-            cache = segment / 'flight_trajectory_svg' / 'flight-1.svg'
-            cache.parent.mkdir()
-            cache.write_text('<svg/>', encoding='utf-8')
-            changed = update_segment_phases(project_root, artifact, ['seg-1'], 'DE')
-            self.assertEqual(changed['changed_segments'], 1)
-            self.assertFalse(cache.exists())
-            self.assertEqual(read_table(data_dir, 'segments').set_index('segment_id').loc['seg-1', 'phase'], 'DE')
-            point_map = read_table(data_dir, 'point_segment_map')
-            self.assertEqual(set(point_map.loc[point_map['segment_id'] == 'seg-1', 'phase']), {'DE'})
-            progress = sqlite3.connect(data_dir / 'segment_progress.sqlite')
-            try:
-                self.assertEqual(progress.execute("SELECT phase FROM segments WHERE segment_id = 'seg-1'").fetchone()[0], 'DE')
-            finally:
-                progress.close()
-            audit = read_table(data_dir, 'phase_label_overrides')
-            self.assertEqual(audit[['segment_id', 'previous_phase', 'phase']].to_dict('records'),
-                             [{'segment_id': 'seg-1', 'previous_phase': 'CL', 'phase': 'DE'}])
-            review = read_table(data_dir, 'flight_phase_sequences')
-            self.assertEqual(review.loc[0, 'phase_sequence'], 'DE>CR')
-            manifest = json.loads((segment / 'manifest.json').read_text(encoding='utf-8'))
-            self.assertTrue(any(item['path'] == 'data/phase_label_overrides.parquet' for item in manifest['outputs']))
-            self._write_history_run(project_root, 'group', 'fixture', '1#20261113_160100#42', [segment / 'manifest.json'])
-            with self.assertRaisesRegex(ValueError, '下游产物'):
-                update_segment_phases(project_root, artifact, ['seg-2'], 'DE')
-
     def test_history_logs_share_the_task_output_panel(self) -> None:
         """历史查看不再生成第二个日志面板，避免同一日志在两处展示。"""
         index = (ROOT / 'src' / 'web_console' / 'static' / 'index.html').read_text(encoding='utf-8')
@@ -290,17 +217,16 @@ class WebConsoleTests(unittest.TestCase):
         self.assertIn('showHistoryTaskOutput(data)', script)
         self.assertNotIn('historyLogs', script)
 
-    def test_segment_phase_filter_allows_multiple_checkbox_values(self) -> None:
-        """阶段筛选允许并集选择；未选标签时仍展示全部记录。"""
+    def test_segment_cell_filter_allows_multiple_checkbox_values(self) -> None:
+        """硬单元筛选允许并集选择；未选单元时仍展示全部记录。"""
         script = (ROOT / 'src' / 'web_console' / 'static' / 'segment_view.js').read_text(encoding='utf-8')
-        self.assertIn('const selectedPhaseFilters = new Set()', script)
-        self.assertNotIn('showDlrResults', script)
-        self.assertIn('阶段筛选（可多选；未勾选显示全部）', script)
+        self.assertIn('const selectedCells = new Set()', script)
+        self.assertIn('硬时空单元筛选（可多选；未勾选显示全部）', script)
         self.assertIn("document.querySelector('#flight-plot-dialog')", script)
         self.assertIn('flightPlotDialog.showModal()', script)
         self.assertIn('closeFlightPlot', script)
-        self.assertIn("filter.type = 'checkbox'", script)
-        self.assertIn('!selectedPhaseFilters.size || selectedPhaseFilters.has(row.phase)', script)
+        self.assertIn("input.type = 'checkbox'", script)
+        self.assertIn('!selectedCells.size || selectedCells.has(row.cell_key)', script)
 
     def test_job_manager_returns_only_the_selected_modules_last_job(self) -> None:
         """任务列表按模块查询；未运行模块不能复用其他模块的输出。"""

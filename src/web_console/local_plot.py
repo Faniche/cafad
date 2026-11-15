@@ -268,7 +268,7 @@ def _draw(paths: dict[str, np.ndarray], color_by_segment: dict[str, str], whole_
     axis.set_xlabel('Longitude (deg)')
     axis.set_ylabel('Latitude (deg)')
     axis.set_zlabel('Geometric altitude (m)')
-    axis.set_title(f"{'Whole flights' if whole_flight else 'Flight-phase segments'}: {len(paths)} paths")
+    axis.set_title(f"{'Whole flights' if whole_flight else 'Hard-cell segments'}: {len(paths)} paths")
     buffer = BytesIO()
     figure.savefig(buffer, format='svg')
     plt.close(figure)

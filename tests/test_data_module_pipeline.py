@@ -102,7 +102,7 @@ class DataModulePipelineTests(unittest.TestCase):
             })
             self.run_command([
                 '-m', 'segment', '--input', str(split_dir / 'manifest.json'),
-                '--window-seconds', '60', '--buckets', '2', '--chunk-rows', '10',
+                '--grid-degrees', '360', '--time-bucket-seconds', '3600',
             ], base)
             segment_dir = next((base / 'data' / '2_segment' / 'preprocessed_data_fixture').iterdir())
             mapping = read_table(segment_dir / 'data', 'point_segment_map')
@@ -111,7 +111,7 @@ class DataModulePipelineTests(unittest.TestCase):
             self.assertTrue(clean_segments['segment_label'].eq(0).all())
             self.run_command([
                 '-m', 'group', '--input', str(segment_dir / 'manifest.json'),
-                '--min-cluster-sizes', '2', '--min-samples-values', '1', '--min-group-members', '2',
+                '--min-group-members', '2', '--min-reference-flights', '2',
             ], base)
             group_dir = next((base / 'data' / '3_group' / 'preprocessed_data_fixture').iterdir())
             protocol = base / 'test_injection_protocol.json'

@@ -6,6 +6,13 @@ import signal
 from .process_control import terminate_workers
 
 
+def configure_worker_threads() -> None:
+    """限制子进程的原生数值库线程，避免进程池与 BLAS 线程嵌套过订阅。"""
+    for key in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
+                'NUMEXPR_NUM_THREADS', 'BLIS_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS'):
+        os.environ[key] = '1'
+
+
 def _exit_worker(signum: int, frame: object) -> None:
     """退出进程而非抛异常，避免 Executor 捕获 KeyboardInterrupt 后继续取任务。"""
     os._exit(128 + signum)

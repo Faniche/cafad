@@ -26,9 +26,9 @@ def align_segments(predictions: pd.DataFrame, truth: pd.DataFrame) -> pd.DataFra
     if set(predictions.segment_id) != set(truth.segment_id):
         raise ValueError('预测与真实分区的片段 ID 不完全一致')
     result = predictions.merge(truth, on='segment_id', validate='one_to_one', suffixes=('', '_truth'))
-    for field in ('flight_id', 'phase', 'split'):
+    for field in ('flight_id', 'cell_key', 'split'):
         if not result[field].equals(result[field + '_truth']):
             raise ValueError(f'预测与真实片段的 {field} 不一致')
     if not np.isfinite(result.score).all() or not result.score.between(0, 1).all():
         raise ValueError('预测分数无效')
-    return result.drop(columns=['flight_id_truth', 'phase_truth', 'split_truth'])
+    return result.drop(columns=['flight_id_truth', 'cell_key_truth', 'split_truth'])

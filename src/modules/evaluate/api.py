@@ -29,7 +29,7 @@ def read_evaluation(detected: Path) -> tuple[pd.DataFrame, pd.DataFrame, str]:
         raise ValueError('评价分区必须为 val 或 test')
     predictions = read_table(detected.parent / 'data', 'segment_predictions', keep_default_na=False,
                              dtype={'segment_id': str, 'flight_id': str})
-    required = {'segment_id', 'flight_id', 'phase', 'split', 'segment_label', 'score', 'prediction'}
+    required = {'segment_id', 'flight_id', 'cell_key', 'split', 'segment_label', 'score', 'prediction'}
     if predictions.empty or predictions['segment_id'].duplicated().any() or not required.issubset(predictions.columns):
         raise ValueError('detect 片段预测缺少动态测试标签或关键字段')
     joined = predictions
@@ -57,8 +57,8 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
     write_json(data / 'metrics.json', metrics)
     write_table(segments, data, 'segment_results')
     write_table(flights, data, 'flight_results')
-    for field, filename in (('phase', 'metrics_by_phase.csv'), ('route_mode', 'metrics_by_route.csv')):
-        keys = sorted(set(segments[field]) | ({'same_phase', 'fallback'} if field == 'route_mode' else set()))
+    for field, filename in (('cell_key', 'metrics_by_hard_cell.csv'), ('route_mode', 'metrics_by_route.csv')):
+        keys = sorted(set(segments[field]) | ({'hard_exact', 'fallback_all_groups'} if field == 'route_mode' else set()))
         rows = []
         for key in keys:
             frame = segments.loc[segments[field].eq(key)]

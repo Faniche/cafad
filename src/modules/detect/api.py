@@ -11,7 +11,7 @@ from src.app.tables import read_table, write_table
 from .inference import score_partition, upstream
 from .fusion import make_predictions
 from src.modules.train.api import _group_manifest, _segment_manifest
-from src.modules.segment.api import segment_observations
+from src.modules.segment.hard_rules import HardSegmentConfig, segment_observations
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -24,30 +24,24 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _test_segmentation(context: RunContext, trained: Path, output: Path) -> dict[str, object]:
-    """依据训练时冻结的分段配置，对从未参与 group 的测试观测动态生成阶段片段。"""
+    """依据训练时冻结的硬规则，对从未参与 group 的测试观测动态生成片段。"""
     injected = upstream(trained, 'inject')
     grouped = _group_manifest(injected)
     segmented = _segment_manifest(grouped)
-    config = json.loads((segmented.parent / 'resolved_config.json').read_text(encoding='utf-8')).get('module', {})
     segment_summary = json.loads((segmented.parent / 'summary.json').read_text(encoding='utf-8'))
-    required = ('window_seconds', 'chunk_rows', 'buckets')
-    if not isinstance(config, dict) or any(name not in config for name in required):
-        raise ValueError('训练祖先 segment 未记录完整分段配置')
+    rules = segment_summary.get('hard_rules')
+    if str(segment_summary.get('segmenter')) != 'hard_grid' or not isinstance(rules, dict):
+        raise ValueError('训练祖先不是 hard_grid 分段；请从 segment 重新运行后续模块')
     source = read_table(injected.parent / 'data', 'observations',
                         dtype={'record_id': 'string', 'flight_id': 'string'})
     test = source.loc[source['split'].eq('test')].copy()
     if test.empty:
         raise ValueError('inject 产物没有测试集观测')
-    if str(segment_summary.get('segmenter', 'sun')) != 'sun':
-        raise ValueError('训练祖先使用已废弃的 DLR 分段；请从 segment 重新运行 Sun，再依次运行 group、inject、train、calibrate')
-    runtime = argparse.Namespace(window_seconds=float(config['window_seconds']),
-                                 chunk_rows=int(config['chunk_rows']), buckets=int(config['buckets']),
-                                 )
-    summary = segment_observations(test, output, runtime, context.workers, context.logger,
-                                   float(segment_summary.get('flight_gap_seconds') or config.get('flight_gap_seconds') or 1800.0),
-                                   )
-    context.logger.info('测试集动态分段完成：points=%d；segments=%d；sequence_categories=%s',
-                        summary['points'], summary['segments'], summary['sequence_categories'])
+    runtime = HardSegmentConfig(**{name: float(rules[name]) for name in ('lower_height_m', 'upper_height_m',
+                                                                          'time_bucket_seconds', 'grid_degrees')})
+    summary = segment_observations(test, output, runtime, int(segment_summary['time_origin_ns']), context.logger)
+    context.logger.info('测试集动态硬分段完成：points=%d；segments=%d；cells=%d',
+                        summary['points'], summary['segments'], summary['cells'])
     return summary
 
 
@@ -61,7 +55,7 @@ def run(context: RunContext, args: argparse.Namespace) -> ModuleResult:
     data = context.staging_dir / 'data'; data.mkdir()
     test_data = data / 'test_segmentation'
     segment_summary = _test_segmentation(context, trained, test_data)
-    scores, pairs, _ = score_partition(trained, args.split, bundle['top_r'], bundle['temperature'], args.gpus,
+    scores, pairs, _ = score_partition(trained, args.split, args.gpus,
                                         context.logger, context.workers, args.score_task_size, test_data)
     segments, flights = make_predictions(scores, bundle['threshold'])
     write_table(pairs, data, 'expert_scores')

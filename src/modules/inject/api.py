@@ -19,10 +19,10 @@ from src.app.arguments import ProjectArgumentParser
 from src.app.artifacts import hash_file, read_manifest
 from src.app.contracts import ModuleResult, RunContext, ValidationReport
 from src.app.tables import read_table, write_table
-from src.data_processing.phase_pipeline import configure_worker_threads
 from src.modules.preprocess.canonical import CANONICAL_COLUMNS
 from src.modules.split.api import SPLIT_NAMES, TRAJECTORY_KINDS
 from src.utils.env import Env
+from src.utils.process_pool import configure_worker_threads
 
 from .corruption import (CorruptionPlan, apply_corruption_plan, flight_seed, load_protocol,
                          minimum_required_points, prepare_corruption_plan)

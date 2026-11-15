@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from src.app.tables import read_table, write_table
 from src.modules.calibrate.threshold import select_segment_threshold
-from src.modules.detect.fusion import fallback_score, fuse_candidates, make_predictions
+from src.modules.detect.fusion import fallback_score, make_predictions
 
 
 class DetectionTests(unittest.TestCase):
@@ -26,10 +26,10 @@ class DetectionTests(unittest.TestCase):
                     'outputs': [], 'dependencies': [{'manifest': str(root / f'{parent}.json')}] if parent else []}), encoding='utf-8')
             (root / 'data').mkdir()
             write_table(pd.DataFrame({'segment_id': ['a', 'b'], 'segment_label': [0, 1], 'flight_id': ['f1', 'f1'],
-                                      'phase': ['CR', 'CR'], 'split': ['test', 'test']}), root / 'data', 'segments')
-            scores = pd.DataFrame({'segment_id': ['a', 'b'], 'flight_id': ['f1', 'f1'], 'phase': ['CR', 'CR'],
+                                      'cell_key': ['h2_t0_x1_y1', 'h2_t0_x1_y1'], 'split': ['test', 'test']}), root / 'data', 'segments')
+            scores = pd.DataFrame({'segment_id': ['a', 'b'], 'flight_id': ['f1', 'f1'], 'cell_key': ['h2_t0_x1_y1', 'h2_t0_x1_y1'],
                                    'split': ['val', 'val'], 'segment_label': [0, 1], 'score': [.2, .8],
-                                   'route_mode': ['same_phase', 'same_phase']})
+                                   'route_mode': ['hard_exact', 'hard_exact']})
             pairs = pd.DataFrame({'segment_id': ['a', 'b'], 'group_id': ['g0', 'g0'], 'score': [.2, .8]})
             with patch.object(PathUtils, 'get_project_root', return_value=root):
                 with patch('src.modules.calibrate.api.score_partition', return_value=(scores, pairs, root / 'segment.json')):
@@ -54,7 +54,6 @@ class DetectionTests(unittest.TestCase):
 
     def test_fusion_and_flight_or(self) -> None:
         self.assertEqual(fallback_score(np.array([.1, .4, .5, .6, .8])), .5)
-        self.assertAlmostEqual(fuse_candidates(np.array([.2, .8]), np.array([10000., 10000.]), 1), .5)
         segments, flights = make_predictions(pd.DataFrame({'segment_id': ['s1', 's2'], 'flight_id': ['f1', 'f1'],
                                                           'score': [.2, .5]}), .5)
         self.assertEqual(segments['prediction'].tolist(), [0, 1])

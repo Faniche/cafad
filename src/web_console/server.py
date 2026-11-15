@@ -26,7 +26,7 @@ from .train_monitor import training_progress
 from .train_util import TrainTaskQueue
 from .web_util import ModuleHistoryUtil
 from .group_view import group_result
-from .segment_view import segment_result, update_segment_phases
+from .segment_view import segment_result
 from .segment_plot import plotly_javascript, segment_flight_html, segment_flight_svg
 from .service import JobManager, build_command, module_catalog, module_schemas, serialize_schemas, upstream_manifest_choices
 
@@ -243,9 +243,6 @@ def create_handler(
             if parsed.path == '/api/segment/plotly.min.js':
                 _javascript_response(self, plotly_javascript())
                 return
-            if parsed.path == '/api/segment/phases':
-                _json_response(self, HTTPStatus.METHOD_NOT_ALLOWED, {'error': '请使用 POST 修改阶段标签'})
-                return
             if parsed.path == '/api/jobs/latest':
                 self._latest_job_get(parse_qs(parsed.query))
                 return
@@ -275,23 +272,6 @@ def create_handler(
                 return
             if path == '/api/server/restart':
                 self._restart()
-                return
-            if path == '/api/segment/phases':
-                if not self._authorized_response(True):
-                    return
-                if manager.has_active_job() or (train_queue is not None and train_queue.has_pending()):
-                    _json_response(self, HTTPStatus.CONFLICT, {'error': '当前有网页任务运行、停止中或排队，不能修改阶段标签'})
-                    return
-                try:
-                    payload = _read_json(self)
-                    artifact = payload.get('artifact')
-                    segment_ids = payload.get('segment_ids')
-                    phase = payload.get('phase')
-                    if not isinstance(artifact, str) or not isinstance(segment_ids, list) or not isinstance(phase, str):
-                        raise ValueError('阶段修改请求缺少 artifact、segment_ids 或 phase')
-                    _json_response(self, HTTPStatus.OK, update_segment_phases(project_root, artifact, segment_ids, phase))
-                except (ValueError, OSError, sqlite3.Error) as exc:
-                    _json_response(self, HTTPStatus.BAD_REQUEST, {'error': str(exc)})
                 return
             if path.startswith('/api/jobs/') and path.endswith('/stop'):
                 if not self._authorized_response(True):
